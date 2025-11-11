@@ -77,13 +77,14 @@
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 
-// ==================== NETWORK CONFIGURATION ====================
-// ***** IMPORTANT: UPDATE THESE VALUES *****
-#define WIFI_SSID           "YOUR_WIFI_SSID"        // Change this
-#define WIFI_PASSWORD       "YOUR_WIFI_PASSWORD"    // Change this
-#define SERVER_HOST         "192.168.1.100"         // Change this (without http://)
-#define SERVER_PORT         3000                    // Change if different
-#define DEVICE_ID           "CIRQUITIQ_001"         // Unique device identifier
+WiFiClientSecure secureClient;
+
+#define WIFI_SSID           "YOUR_ACTUAL_WIFI_NAME"
+#define WIFI_PASSWORD       "YOUR_ACTUAL_WIFI_PASSWORD"
+#define SERVER_HOST         "meifhi-esp-server.onrender.com"
+#define SERVER_PORT         443
+#define DEVICE_ID           "CIRQUITIQ_001"  // Make unique per device
+#define DEVICE_TYPE         "CIRQUITIQ"             // ✅ Added!
 
 // Network settings
 #define WIFI_CONNECT_TIMEOUT    20000
@@ -91,6 +92,7 @@
 #define SERVER_POST_INTERVAL    5000    // Send data every 5 seconds
 #define SERVER_TIMEOUT          10000
 #define WEBSOCKET_RECONNECT_INT 10000
+#define MAX_RETRY_ATTEMPTS      3       // ✅ Added!
 
 // ==================== PIN DEFINITIONS ====================
 #define ACS712_CH1_PIN      34
@@ -115,21 +117,6 @@
 #define I2C_SCL_PIN         22
 #define LCD_I2C_ADDR        0x27  // Common address, can be 0x3F
 
-
-// ==================== NETWORK CONFIGURATION ====================
-// ***** IMPORTANT: UPDATE THESE VALUES *****
-#define WIFI_SSID           "YOUR_WIFI_SSID"        // Change this
-#define WIFI_PASSWORD       "YOUR_WIFI_PASSWORD"    // Change this
-#define SERVER_HOST         "192.168.1.100"         // Change this (without http://)
-#define SERVER_PORT         3000                    // Change if different
-#define DEVICE_ID           "CIRQUITIQ_001"         // Unique device identifier
-
-// Network settings
-#define WIFI_CONNECT_TIMEOUT    20000
-#define WIFI_RECONNECT_INTERVAL 30000
-#define SERVER_POST_INTERVAL    5000    // Send data every 5 seconds
-#define SERVER_TIMEOUT          10000
-#define WEBSOCKET_RECONNECT_INT 10000
 // ==================== CHANNEL CONFIGURATION ====================
 #define NUM_CHANNELS        2
 #define CHANNEL_1           0
@@ -285,6 +272,10 @@ bool criticalError = false;
 bool displayEnabled = DISPLAY_ENABLED;
 bool tftInitialized = false;
 bool lcdInitialized = false;
+
+// ✅ ADD THESE NEW VARIABLES:
+int serverErrorCount = 0;
+int serverSuccessCount = 0;
 
 // Create Adafruit display object (software SPI - no CS pin for GMT130)
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_DC, TFT_RST, TFT_MOSI, TFT_SCLK);
@@ -894,6 +885,17 @@ void loop() {
   // Network maintenance
   if (wifiConnected) {
     webSocket.loop();
+    static unsigned long lastHeartbeat = 0;
+    if (millis() - lastHeartbeat >= 30000) {
+      if (webSocket.isConnected()) {
+        StaticJsonDocument<64> doc;
+        doc["type"] = "ping";
+        String message;
+        serializeJson(doc, message);
+        webSocket.sendTXT(message);
+      }
+      lastHeartbeat = millis();
+    }
     reconnectWebSocket();
   }
   
@@ -1704,6 +1706,11 @@ void enableChannel(int channel) {
   channels[channel].relayEnabled = true;
   channels[channel].relayCommandState = true;
   digitalWrite(channels[channel].relayPin, RELAY_ON_STATE);
+  delay(100);  // Let relay settle
+  Serial.printf("Relay %d actual state: %s\n", 
+    channel, 
+    digitalRead(channels[channel].relayPin) == RELAY_ON_STATE ? "ON" : "OFF"
+  );
   Serial.printf("✓ %s ENABLED\n", channels[channel].name);
 }
 
@@ -2017,6 +2024,10 @@ void handleSerialCommands() {
 
 void processCommand(const char* command) {
   Serial.printf("\n> %s\n", command);
+
+  Serial.println(F("========================================"));
+  Serial.printf("Command received: '%s'\n", command);
+  Serial.println(F("========================================"));
   
   if (strcmp(command, "reset") == 0) {
     emergencyReset();
@@ -2496,6 +2507,32 @@ void printDiagnostics() {
   Serial.printf("SD Card: %s\n", sdCardAvailable ? "Yes" : "No");
   Serial.printf("Buzzer: %s\n", buzzerEnabled ? "Enabled" : "Disabled");
   Serial.printf("TFT: %s\n", tftInitialized ? "Active" : "Inactive");
+  
+  Serial.println(F("\n========================================\n"));
+
+  Serial.println(F("\n--- NETWORK & SERVER ---"));
+  Serial.printf("WiFi Connected: %s\n", wifiConnected ? "YES" : "NO");
+  if (wifiConnected) {
+    Serial.print(F("IP Address: "));
+    Serial.println(WiFi.localIP());
+    Serial.printf("Signal Strength: %d dBm\n", WiFi.RSSI());
+  }
+  Serial.printf("Server Connected: %s\n", serverConnected ? "YES" : "NO");
+  Serial.printf("Server Host: %s\n", SERVER_HOST);
+  Serial.printf("Server Port: %d (HTTPS)\n", SERVER_PORT);
+  Serial.printf("Device ID: %s\n", DEVICE_ID);
+  Serial.printf("Device Type: %s\n", DEVICE_TYPE);
+  
+  // Server statistics
+  int totalRequests = serverSuccessCount + serverErrorCount;
+  float successRate = totalRequests > 0 ? 
+                      (float)serverSuccessCount / totalRequests * 100.0 : 0;
+  
+  Serial.println(F("\nServer Statistics:"));
+  Serial.printf("  Successful sends: %d\n", serverSuccessCount);
+  Serial.printf("  Failed sends: %d\n", serverErrorCount);
+  Serial.printf("  Total requests: %d\n", totalRequests);
+  Serial.printf("  Success rate: %.1f%%\n", successRate);
   
   Serial.println(F("\n========================================\n"));
 }
@@ -3034,6 +3071,8 @@ void initWiFi() {
   Serial.println(WIFI_SSID);
   Serial.print(F("Device ID: "));
   Serial.println(DEVICE_ID);
+  Serial.print(F("Device Type: "));
+  Serial.println(DEVICE_TYPE);
   
   if (lcdInitialized) {
     lcd.clear();
@@ -3053,12 +3092,20 @@ void initWiFi() {
   
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
-    Serial.println(F("\n✓ WiFi Connected!"));
+    Serial.println(F("\nWiFi Connected!"));
     Serial.print(F("IP Address: "));
     Serial.println(WiFi.localIP());
     Serial.print(F("Signal: "));
     Serial.print(WiFi.RSSI());
     Serial.println(F(" dBm"));
+    
+    // ✅ CRITICAL: Configure SSL/TLS for HTTPS
+    secureClient.setInsecure();  // Accept any certificate (for testing)
+    // For production: secureClient.setCACert(root_ca);
+    
+    Serial.println(F(" SSL/TLS configured for HTTPS"));
+    Serial.print(F("Server: https://"));
+    Serial.println(SERVER_HOST);
     
     if (lcdInitialized) {
       lcd.setCursor(0, 1);
@@ -3067,15 +3114,16 @@ void initWiFi() {
       lcd.print(WiFi.localIP());
     }
     
+    // ✅ FIXED: WebSocket with correct host (domain only, no https://)
     Serial.println(F("Initializing WebSocket..."));
-    webSocket.begin(SERVER_HOST, SERVER_PORT, "/socket.io/?EIO=4&transport=websocket");
+    webSocket.begin(SERVER_HOST, SERVER_PORT, "/ws"); // Simple path for HTTPS
     webSocket.onEvent(webSocketEvent);
     webSocket.setReconnectInterval(WEBSOCKET_RECONNECT_INT);
     
     delay(2000);
   } else {
     wifiConnected = false;
-    Serial.println(F("\n✗ WiFi Connection Failed!"));
+    Serial.println(F("\nâœ— WiFi Connection Failed!"));
     Serial.println(F("Continuing in offline mode"));
     
     if (lcdInitialized) {
@@ -3088,6 +3136,37 @@ void initWiFi() {
     delay(2000);
   }
 }
+
+void registerWithServer() {
+     if (!webSocket.isConnected()) return;
+     
+     StaticJsonDocument<128> doc;
+     doc["type"] = "register";
+     doc["deviceId"] = DEVICE_ID;
+     doc["deviceType"] = DEVICE_TYPE;
+     
+     String message;
+     serializeJson(doc, message);
+     
+     webSocket.sendTXT(message);
+     Serial.println(F("✓ Registration message sent"));
+   }
+
+void sendCommandAck(const char* command, bool success) {
+     if (!webSocket.isConnected()) return;
+     
+     StaticJsonDocument<128> doc;
+     doc["type"] = "commandAck";
+     doc["deviceId"] = DEVICE_ID;
+     doc["command"] = command;
+     doc["success"] = success;
+     
+     String message;
+     serializeJson(doc, message);
+     
+     webSocket.sendTXT(message);
+     Serial.printf("✓ Command acknowledgment sent: %s (success=%d)\n", command, success);
+   }
 
 void checkWiFiConnection() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -3110,7 +3189,7 @@ void checkWiFiConnection() {
       Serial.print(F("IP: "));
       Serial.println(WiFi.localIP());
       
-      webSocket.begin(SERVER_HOST, SERVER_PORT, "/socket.io/?EIO=4&transport=websocket");
+      webSocket.begin(SERVER_HOST, SERVER_PORT, "/ws");
     }
   }
 }
@@ -3120,14 +3199,32 @@ void sendDataToServer() {
     return;
   }
   
+  if (!sensorsValid) {
+    return;
+  }
+  
+  HTTPClient https;  // Use HTTPS
+  
+  // ✅ Build HTTPS URL correctly
+  String serverUrl = "https://";
+  serverUrl += SERVER_HOST;
+  serverUrl += "/api/data";  // No port needed for standard HTTPS (443)
+  
+  // ✅ CRITICAL: Use secure client
+  https.begin(secureClient, serverUrl);
+  https.addHeader("Content-Type", "application/json");
+  https.setTimeout(SERVER_TIMEOUT);
+  
+  // ✅ Create complete JSON payload
   StaticJsonDocument<768> doc;
   
   doc["deviceId"] = DEVICE_ID;
-  doc["deviceType"] = "CIRQUITIQ";
+  doc["deviceType"] = DEVICE_TYPE;  // ✅ Use constant
   doc["voltage"] = voltageReading;
   doc["state"] = getStateString();
   doc["sensors"] = sensorsValid ? "valid" : "invalid";
   
+  // Channel 1 data
   JsonObject ch1 = doc.createNestedObject("channel1");
   ch1["current"] = channels[CHANNEL_1].currentReading;
   ch1["power"] = channels[CHANNEL_1].powerReading;
@@ -3135,6 +3232,7 @@ void sendDataToServer() {
   ch1["cost"] = channels[CHANNEL_1].costAccumulated;
   ch1["relayState"] = channels[CHANNEL_1].relayEnabled;
   
+  // Channel 2 data
   JsonObject ch2 = doc.createNestedObject("channel2");
   ch2["current"] = channels[CHANNEL_2].currentReading;
   ch2["power"] = channels[CHANNEL_2].powerReading;
@@ -3142,6 +3240,7 @@ void sendDataToServer() {
   ch2["cost"] = channels[CHANNEL_2].costAccumulated;
   ch2["relayState"] = channels[CHANNEL_2].relayEnabled;
   
+  // Total values
   doc["totalPower"] = channels[CHANNEL_1].powerReading + channels[CHANNEL_2].powerReading;
   doc["totalEnergy"] = channels[CHANNEL_1].energyConsumed + channels[CHANNEL_2].energyConsumed;
   doc["totalCost"] = channels[CHANNEL_1].costAccumulated + channels[CHANNEL_2].costAccumulated;
@@ -3149,40 +3248,56 @@ void sendDataToServer() {
   String jsonPayload;
   serializeJson(doc, jsonPayload);
   
-  String serverUrl = "http://";
-  serverUrl += SERVER_HOST;
-  serverUrl += ":";
-  serverUrl += SERVER_PORT;
-  serverUrl += "/api/data";
+  // ✅ Add retry logic
+  int attempts = 0;
+  bool success = false;
   
-  http.begin(serverUrl);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(SERVER_TIMEOUT);
-  
-  int httpCode = http.POST(jsonPayload);
-  
-  if (httpCode > 0) {
-    if (httpCode == HTTP_CODE_OK) {
-      serverConnected = true;
-      Serial.print(F("."));
-      
-      if (loopCount % 10 == 0) {
-        String response = http.getString();
-        Serial.println(F("\n✓ Data sent to server"));
-        Serial.println(response);
+  while (attempts < MAX_RETRY_ATTEMPTS && !success) {
+    int httpCode = https.POST(jsonPayload);
+    
+    if (httpCode > 0) {
+      if (httpCode == 200 || httpCode == HTTP_CODE_OK) {
+        success = true;
+        serverConnected = true;
+        serverSuccessCount++;
+        
+        // Quiet success indicator (detailed log every 20 sends)
+        if (serverSuccessCount % 20 == 0) {
+          String response = https.getString();
+          Serial.println(F("\nData sent to server successfully"));
+          Serial.printf("  Success count: %d\n", serverSuccessCount);
+          Serial.printf("  Response: %s\n", response.c_str());
+        } else {
+          Serial.print(F("."));  // Quiet indicator
+        }
+      } else {
+        serverErrorCount++;
+        Serial.printf("\nâš  Server returned HTTP %d (attempt %d/%d)\n", 
+                      httpCode, attempts + 1, MAX_RETRY_ATTEMPTS);
+        attempts++;
+        if (attempts < MAX_RETRY_ATTEMPTS) {
+          delay(1000);  // Wait before retry
+        }
       }
     } else {
-      serverConnected = false;
-      Serial.print(F("\n⚠ Server code: "));
-      Serial.println(httpCode);
+      serverErrorCount++;
+      Serial.printf("\nâœ— HTTP request failed (attempt %d/%d): %s\n", 
+                    attempts + 1, MAX_RETRY_ATTEMPTS,
+                    https.errorToString(httpCode).c_str());
+      attempts++;
+      if (attempts < MAX_RETRY_ATTEMPTS) {
+        delay(1000);
+      }
     }
-  } else {
-    serverConnected = false;
-    Serial.print(F("\n✗ POST failed: "));
-    Serial.println(http.errorToString(httpCode).c_str());
   }
   
-  http.end();
+  if (!success) {
+    serverConnected = false;
+    Serial.printf("âœ— Failed to send data after %d attempts\n", MAX_RETRY_ATTEMPTS);
+    Serial.printf("  Error count: %d, Success count: %d\n", serverErrorCount, serverSuccessCount);
+  }
+  
+  https.end();
 }
 
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
@@ -3195,6 +3310,8 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     case WStype_CONNECTED:
       Serial.println(F("✓ WebSocket Connected"));
       serverConnected = true;
+      delay(100);  // Small delay to ensure connection is established
+      registerWithServer();
       break;
       
     case WStype_TEXT:
@@ -3229,17 +3346,21 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 }
 
 void processServerCommand(const char* command) {
-  Serial.print(F("Processing command: "));
+  Serial.print(F("Processing server command: "));
   Serial.println(command);
-  
+     
+     // Process the command
   processCommand(command);
+     
+     // Send acknowledgment
+  sendCommandAck(command, true);
 }
 
 void reconnectWebSocket() {
   if (wifiConnected && !webSocket.isConnected()) {
     if (millis() - lastWebSocketReconnect >= WEBSOCKET_RECONNECT_INT) {
       Serial.println(F("Reconnecting WebSocket..."));
-      webSocket.begin(SERVER_HOST, SERVER_PORT, "/socket.io/?EIO=4&transport=websocket");
+      webSocket.begin(SERVER_HOST, SERVER_PORT, "/ws");
       lastWebSocketReconnect = millis();
     }
   }
