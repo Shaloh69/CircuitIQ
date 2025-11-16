@@ -264,6 +264,7 @@ CalibrationState calState = CAL_IDLE;
 bool manualControl = false;
 bool safetyEnabled = true;
 bool buzzerEnabled = true;
+bool buzzerInverted = true;  // Set to true if NPN transistor causes buzzer to beep when GPIO is LOW
 bool sdCardAvailable = false;
 bool wifiConnected = false;
 bool serverConnected = false;
@@ -388,6 +389,7 @@ void updateEnergyCalculation();
 void updateCostCalculation();
 void updateStatistics();
 void updateStatusLEDs();
+void setBuzzer(bool state);
 void updateDisplay();
 void initTFTDisplay();
 void updateTFTDisplay();
@@ -463,7 +465,7 @@ void setup() {
   digitalWrite(channels[CHANNEL_2].relayPin, RELAY_OFF_STATE);
   digitalWrite(RED_LED_PIN, LOW);
   digitalWrite(GREEN_LED_PIN, LOW);
-  digitalWrite(BUZZER_PIN, LOW);
+  setBuzzer(false);  // Initialize buzzer OFF
   
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
@@ -602,6 +604,12 @@ void setTFTBrightness(uint8_t brightness) {
   }
 }
 
+// ==================== BUZZER CONTROL WITH POLARITY SUPPORT ====================
+void setBuzzer(bool state) {
+  // If buzzer is inverted (NPN transistor causing active-LOW behavior), flip the state
+  bool actualState = buzzerInverted ? !state : state;
+  digitalWrite(BUZZER_PIN, actualState ? HIGH : LOW);
+}
 
 // ==================== INITIALIZE I2C LCD ====================
 void initLCDDisplay() {
@@ -630,126 +638,142 @@ void initLCDDisplay() {
 // ==================== UPDATE I2C LCD DISPLAY ====================
 void updateLCDDisplay() {
   if (!lcdInitialized) return;
-  
-  lcd.clear();
-  
+
+  // Track previous display mode to avoid unnecessary clearing
+  static uint8_t prevDisplayMode = 255;  // 0=normal, 1=warning, 2=error
+  uint8_t currentDisplayMode = 0;
+
   // Check for critical errors/warnings FIRST
   bool hasError = false;
   bool hasWarning = false;
   
   // Priority 1: Critical Errors (display immediately)
   if (voltageReading < MIN_VALID_VOLTAGE) {
+    currentDisplayMode = 2;  // Error mode
+    if (prevDisplayMode != currentDisplayMode) lcd.clear();
+
     // NO VOLTAGE ERROR
     lcd.setCursor(0, 0);
-    lcd.print("** ERROR **");
+    lcd.print("** ERROR **         ");
     lcd.setCursor(0, 1);
-    lcd.print("NO VOLTAGE!");
+    lcd.print("NO VOLTAGE!         ");
     lcd.setCursor(0, 2);
-    lcd.print("Check ZMPT101B");
+    lcd.print("Check ZMPT101B      ");
     lcd.setCursor(0, 3);
-    lcd.print("V: ");
-    lcd.print(voltageReading, 1);
-    lcd.print("V");
+    char buf[21];
+    snprintf(buf, sizeof(buf), "V: %.1fV             ", voltageReading);
+    lcd.print(buf);
     hasError = true;
   }
   else if (channels[0].sensorFaultDetected || channels[1].sensorFaultDetected) {
+    currentDisplayMode = 2;  // Error mode
+    if (prevDisplayMode != currentDisplayMode) lcd.clear();
+
     // SENSOR FAULT ERROR
     lcd.setCursor(0, 0);
-    lcd.print("** ERROR **");
+    lcd.print("** ERROR **         ");
     lcd.setCursor(0, 1);
-    lcd.print("SENSOR FAULT!");
+    lcd.print("SENSOR FAULT!       ");
     lcd.setCursor(0, 2);
-    if (channels[0].sensorFaultDetected) lcd.print("CH1 Sensor Fault");
-    if (channels[1].sensorFaultDetected) lcd.print("CH2 Sensor Fault");
+    if (channels[0].sensorFaultDetected) lcd.print("CH1 Sensor Fault    ");
+    if (channels[1].sensorFaultDetected) lcd.print("CH2 Sensor Fault    ");
     lcd.setCursor(0, 3);
-    lcd.print("Check ACS712");
+    lcd.print("Check ACS712        ");
     hasError = true;
   }
   
   // Priority 2: Warnings (if no errors)
   else if (overvoltageDetected) {
+    currentDisplayMode = 1;  // Warning mode
+    if (prevDisplayMode != currentDisplayMode) lcd.clear();
+
     // OVERVOLTAGE WARNING
     lcd.setCursor(0, 0);
-    lcd.print("*** WARNING ***");
+    lcd.print("*** WARNING ***     ");
     lcd.setCursor(0, 1);
-    lcd.print("OVERVOLTAGE!");
+    lcd.print("OVERVOLTAGE!        ");
     lcd.setCursor(0, 2);
-    lcd.print("V: ");
-    lcd.print(voltageReading, 1);
-    lcd.print("V (>250V)");
+    char buf[21];
+    snprintf(buf, sizeof(buf), "V: %.1fV (>250V)    ", voltageReading);
+    lcd.print(buf);
     lcd.setCursor(0, 3);
-    lcd.print("Relays OFF");
+    lcd.print("Relays OFF          ");
     hasWarning = true;
   }
   else if (brownoutDetected) {
+    currentDisplayMode = 1;  // Warning mode
+    if (prevDisplayMode != currentDisplayMode) lcd.clear();
+
     // BROWNOUT WARNING
     lcd.setCursor(0, 0);
-    lcd.print("*** WARNING ***");
+    lcd.print("*** WARNING ***     ");
     lcd.setCursor(0, 1);
-    lcd.print("BROWNOUT!");
+    lcd.print("BROWNOUT!           ");
     lcd.setCursor(0, 2);
-    lcd.print("V: ");
-    lcd.print(voltageReading, 1);
-    lcd.print("V (<180V)");
+    char buf[21];
+    snprintf(buf, sizeof(buf), "V: %.1fV (<180V)    ", voltageReading);
+    lcd.print(buf);
     lcd.setCursor(0, 3);
-    lcd.print("Relays OFF");
+    lcd.print("Relays OFF          ");
     hasWarning = true;
   }
   else if (undervoltageDetected) {
+    currentDisplayMode = 1;  // Warning mode
+    if (prevDisplayMode != currentDisplayMode) lcd.clear();
+
     // UNDERVOLTAGE WARNING
     lcd.setCursor(0, 0);
-    lcd.print("*** WARNING ***");
+    lcd.print("*** WARNING ***     ");
     lcd.setCursor(0, 1);
-    lcd.print("UNDERVOLTAGE!");
+    lcd.print("UNDERVOLTAGE!       ");
     lcd.setCursor(0, 2);
-    lcd.print("V: ");
-    lcd.print(voltageReading, 1);
-    lcd.print("V (<200V)");
+    char buf[21];
+    snprintf(buf, sizeof(buf), "V: %.1fV (<200V)    ", voltageReading);
+    lcd.print(buf);
     lcd.setCursor(0, 3);
-    lcd.print("Check voltage");
+    lcd.print("Check voltage       ");
     hasWarning = true;
   }
   else if (channels[0].overcurrentDetected || channels[1].overcurrentDetected) {
+    currentDisplayMode = 1;  // Warning mode
+    if (prevDisplayMode != currentDisplayMode) lcd.clear();
+
     // OVERCURRENT WARNING
     lcd.setCursor(0, 0);
-    lcd.print("*** WARNING ***");
+    lcd.print("*** WARNING ***     ");
     lcd.setCursor(0, 1);
-    lcd.print("OVERCURRENT!");
+    lcd.print("OVERCURRENT!        ");
     lcd.setCursor(0, 2);
+    char buf[21];
     if (channels[0].overcurrentDetected) {
-      lcd.print("CH1: ");
-      lcd.print(channels[0].currentReading, 2);
-      lcd.print("A");
+      snprintf(buf, sizeof(buf), "CH1: %.2fA          ", channels[0].currentReading);
+    } else if (channels[1].overcurrentDetected) {
+      snprintf(buf, sizeof(buf), "CH2: %.2fA          ", channels[1].currentReading);
     }
-    if (channels[1].overcurrentDetected) {
-      lcd.print("CH2: ");
-      lcd.print(channels[1].currentReading, 2);
-      lcd.print("A");
-    }
+    lcd.print(buf);
     lcd.setCursor(0, 3);
-    lcd.print("Limit: 4.5A");
+    lcd.print("Limit: 4.5A         ");
     hasWarning = true;
   }
   
   // Priority 3: Normal Display (if no errors or warnings)
   if (!hasError && !hasWarning) {
+    currentDisplayMode = 0;  // Normal mode
+    if (prevDisplayMode != currentDisplayMode) lcd.clear();
+
     if (LCD_ROWS == 4 && LCD_COLS == 20) {
       // 20x4 LCD Layout with Timer
       float totalPower = channels[0].powerReading + channels[1].powerReading;
       float totalCost = channels[0].costAccumulated + channels[1].costAccumulated;
-      
-      // Line 0: Voltage, Power, and Uptime Timer
+      char buf[21];
+
+      // Line 0: Voltage, Power, and Network Status
       lcd.setCursor(0, 0);
-      lcd.print("V:");
-      lcd.print(voltageReading, 1);
-      lcd.print("V");
-      
-      lcd.setCursor(9, 0);
-      lcd.print("P:");
-      lcd.print(totalPower, 1);
-      lcd.print("W");
-      
-      // Network status indicator
+      snprintf(buf, sizeof(buf), "V:%.1fV P:%.1fW      ", voltageReading, totalPower);
+      buf[20] = '\0';  // Ensure null termination
+      lcd.print(buf);
+
+      // Network status indicator (last 2 chars of line 0)
       lcd.setCursor(18, 0);
       if (wifiConnected && serverConnected) {
         lcd.print("OK");
@@ -758,63 +782,51 @@ void updateLCDDisplay() {
       } else {
         lcd.print("--");
       }
-      
-      // Line 1: Channel 1
+
+      // Line 1: Channel 1 Current and Energy
       lcd.setCursor(0, 1);
-      lcd.print("CH1:");
-      lcd.print(channels[0].currentReading, 2);
-      lcd.print("A");
-      
-      lcd.setCursor(11, 1);
-      lcd.print(channels[0].energyConsumed, 2);
-      lcd.print("kWh");
-      
-      // Line 2: Channel 2
+      snprintf(buf, sizeof(buf), "CH1:%.2fA  %.2fkWh  ",
+               channels[0].currentReading, channels[0].energyConsumed);
+      buf[20] = '\0';
+      lcd.print(buf);
+
+      // Line 2: Channel 2 Current and Energy
       lcd.setCursor(0, 2);
-      lcd.print("CH2:");
-      lcd.print(channels[1].currentReading, 2);
-      lcd.print("A");
-      
-      lcd.setCursor(11, 2);
-      lcd.print(channels[1].energyConsumed, 2);
-      lcd.print("kWh");
-      
+      snprintf(buf, sizeof(buf), "CH2:%.2fA  %.2fkWh  ",
+               channels[1].currentReading, channels[1].energyConsumed);
+      buf[20] = '\0';
+      lcd.print(buf);
+
       // Line 3: Total Cost and Relay Status
       lcd.setCursor(0, 3);
-      lcd.print("P");
-      lcd.print(totalCost, 2);
-      
-      // Show relay status
-      lcd.setCursor(12, 3);
-      lcd.print("R1:");
-      lcd.print(channels[0].relayEnabled ? "ON" : "OF");
-      lcd.print(" ");
-      lcd.print("R2:");
-      lcd.print(channels[1].relayEnabled ? "ON" : "OF");
+      snprintf(buf, sizeof(buf), "P%.2f R1:%s R2:%s ",
+               totalCost,
+               channels[0].relayEnabled ? "ON " : "OFF",
+               channels[1].relayEnabled ? "ON " : "OFF");
+      buf[20] = '\0';
+      lcd.print(buf);
       
     } else if (LCD_ROWS == 2 && LCD_COLS == 16) {
       // 16x2 LCD Layout - Rotating display with timer
       static int displayPage = 0;
       static unsigned long lastPageChange = 0;
-      
+      char buf[17];
+
       if (millis() - lastPageChange > 3000) {
-        displayPage = (displayPage + 1) % 4;  // 4 pages now
+        displayPage = (displayPage + 1) % 4;  // 4 pages
         lastPageChange = millis();
+        lcd.clear();  // Clear on page change for 16x2
       }
-      
+
       switch (displayPage) {
         case 0: {
           // Voltage and Power
           lcd.setCursor(0, 0);
-          lcd.print("V:");
-          lcd.print(voltageReading, 1);
-          lcd.print("V");
-          
-          lcd.setCursor(9, 0);
-          lcd.print("P:");
-          lcd.print(channels[0].powerReading + channels[1].powerReading, 1);
-          lcd.print("W");
-          
+          snprintf(buf, sizeof(buf), "V:%.1fV P:%.1fW  ", voltageReading,
+                   channels[0].powerReading + channels[1].powerReading);
+          buf[16] = '\0';
+          lcd.print(buf);
+
           lcd.setCursor(0, 1);
           // Network status
           if (wifiConnected && serverConnected) {
@@ -826,49 +838,57 @@ void updateLCDDisplay() {
           }
           break;
         }
-          
+
         case 1: {
           // Channel 1
           lcd.setCursor(0, 0);
-          lcd.print("CH1: ");
-          lcd.print(channels[0].currentReading, 2);
-          lcd.print("A");
-          
+          snprintf(buf, sizeof(buf), "CH1: %.2fA      ", channels[0].currentReading);
+          buf[16] = '\0';
+          lcd.print(buf);
+
           lcd.setCursor(0, 1);
-          lcd.print("kWh: ");
-          lcd.print(channels[0].energyConsumed, 3);
+          snprintf(buf, sizeof(buf), "kWh: %.3f      ", channels[0].energyConsumed);
+          buf[16] = '\0';
+          lcd.print(buf);
           break;
         }
-          
+
         case 2: {
           // Channel 2
           lcd.setCursor(0, 0);
-          lcd.print("CH2: ");
-          lcd.print(channels[1].currentReading, 2);
-          lcd.print("A");
-          
+          snprintf(buf, sizeof(buf), "CH2: %.2fA      ", channels[1].currentReading);
+          buf[16] = '\0';
+          lcd.print(buf);
+
           lcd.setCursor(0, 1);
-          lcd.print("kWh: ");
-          lcd.print(channels[1].energyConsumed, 3);
+          snprintf(buf, sizeof(buf), "kWh: %.3f      ", channels[1].energyConsumed);
+          buf[16] = '\0';
+          lcd.print(buf);
           break;
         }
-          
+
         case 3: {
           // Cost and Status
           lcd.setCursor(0, 0);
-          lcd.print("Cost: P");
-          lcd.print(channels[0].costAccumulated + channels[1].costAccumulated, 2);
-          
+          snprintf(buf, sizeof(buf), "Cost: P%.2f     ",
+                   channels[0].costAccumulated + channels[1].costAccumulated);
+          buf[16] = '\0';
+          lcd.print(buf);
+
           lcd.setCursor(0, 1);
-          lcd.print("R1:");
-          lcd.print(channels[0].relayEnabled ? "ON" : "OFF");
-          lcd.print(" R2:");
-          lcd.print(channels[1].relayEnabled ? "ON" : "OFF");
+          snprintf(buf, sizeof(buf), "R1:%s R2:%s    ",
+                   channels[0].relayEnabled ? "ON " : "OFF",
+                   channels[1].relayEnabled ? "ON " : "OFF");
+          buf[16] = '\0';
+          lcd.print(buf);
           break;
         }
       }
     }
   }
+
+  // Update previous display mode
+  prevDisplayMode = currentDisplayMode;
 }
 
 // ==================== MAIN LOOP ====================
@@ -1173,13 +1193,13 @@ void startupSequence() {
   
   if (buzzerEnabled) {
     Serial.println(F("Testing buzzer..."));
-    digitalWrite(BUZZER_PIN, HIGH);
+    setBuzzer(true);
     delay(100);
-    digitalWrite(BUZZER_PIN, LOW);
+    setBuzzer(false);
     delay(100);
-    digitalWrite(BUZZER_PIN, HIGH);
+    setBuzzer(true);
     delay(100);
-    digitalWrite(BUZZER_PIN, LOW);
+    setBuzzer(false);
   }
   
   Serial.println(F("✓ Hardware test complete"));
@@ -1324,13 +1344,13 @@ void autoCalibrateSensorsNonBlocking() {
           
           // Buzzer confirmation (Active Buzzer - uses digitalWrite)
           if (buzzerEnabled) {
-            digitalWrite(BUZZER_PIN, HIGH);  // Turn on
+            setBuzzer(true);   // Turn on
             delay(150);
-            digitalWrite(BUZZER_PIN, LOW);   // Turn off
+            setBuzzer(false);  // Turn off
             delay(50);
-            digitalWrite(BUZZER_PIN, HIGH);  // Turn on
+            setBuzzer(true);   // Turn on
             delay(150);
-            digitalWrite(BUZZER_PIN, LOW);   // Turn off
+            setBuzzer(false);  // Turn off
           }
         } else {
           Serial.println(F("\n⚠️  Sensor warnings present"));
@@ -1676,9 +1696,9 @@ void triggerSafetyShutdown(int channel, const char* reason) {
   
   if (buzzerEnabled) {
     for (int i = 0; i < 3; i++) {
-      digitalWrite(BUZZER_PIN, HIGH);
+      setBuzzer(true);
       delay(150);
-      digitalWrite(BUZZER_PIN, LOW);
+      setBuzzer(false);
       delay(100);
       feedWatchdog();
     }
@@ -2144,6 +2164,18 @@ void processCommand(const char* command) {
     buzzerEnabled = !buzzerEnabled;
     Serial.printf("Buzzer: %s\n", buzzerEnabled ? "ON" : "OFF");
   }
+  else if (strcmp(command, "buzzer_invert") == 0) {
+    buzzerInverted = !buzzerInverted;
+    Serial.printf("Buzzer Polarity: %s (set to %s if buzzer beeps continuously)\n",
+                  buzzerInverted ? "INVERTED" : "NORMAL",
+                  buzzerInverted ? "INVERTED" : "NORMAL");
+    // Test the new setting with a quick beep
+    if (buzzerEnabled) {
+      setBuzzer(true);
+      delay(100);
+      setBuzzer(false);
+    }
+  }
   else if (strcmp(command, "display") == 0) {
     displayEnabled = !displayEnabled;
     Serial.printf("Display: %s\n", displayEnabled ? "ON" : "OFF");
@@ -2391,6 +2423,7 @@ void printMenu() {
   Serial.println(F("  manual     - Toggle manual"));
   Serial.println(F("  safety     - Toggle safety"));
   Serial.println(F("  buzzer     - Toggle buzzer"));
+  Serial.println(F("  buzzer_invert - Toggle buzzer polarity (fix continuous beeping)"));
   Serial.println(F("  display    - Toggle TFT"));
   Serial.println(F("  display_test - Test display"));
   Serial.println(F("  rate X     - Set ₱/kWh"));
@@ -2666,9 +2699,9 @@ void testBuzzer() {
   }
   Serial.println(F("Testing buzzer..."));
   for (int i = 0; i < 3; i++) {
-    digitalWrite(BUZZER_PIN, HIGH);
+    setBuzzer(true);
     delay(200);
-    digitalWrite(BUZZER_PIN, LOW);
+    setBuzzer(false);
     delay(200);
     feedWatchdog();
   }
