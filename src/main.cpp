@@ -3116,7 +3116,7 @@ void initWiFi() {
     
     // ✅ FIXED: WebSocket with correct host (domain only, no https://)
     Serial.println(F("Initializing WebSocket..."));
-    webSocket.begin(SERVER_HOST, SERVER_PORT, "/ws"); // Simple path for HTTPS
+    webSocket.beginSSL(SERVER_HOST, SERVER_PORT, "/ws"); // SSL WebSocket for HTTPS
     webSocket.onEvent(webSocketEvent);
     webSocket.setReconnectInterval(WEBSOCKET_RECONNECT_INT);
     
@@ -3188,8 +3188,11 @@ void checkWiFiConnection() {
       Serial.println(F("✓ WiFi Reconnected!"));
       Serial.print(F("IP: "));
       Serial.println(WiFi.localIP());
+
+      secureClient.setInsecure();  // Reconfigure SSL after reconnection
+      Serial.println(F("✓ SSL/TLS reconfigured"));
       
-      webSocket.begin(SERVER_HOST, SERVER_PORT, "/ws");
+      webSocket.beginSSL(SERVER_HOST, SERVER_PORT, "/ws");
     }
   }
 }
@@ -3360,7 +3363,7 @@ void reconnectWebSocket() {
   if (wifiConnected && !webSocket.isConnected()) {
     if (millis() - lastWebSocketReconnect >= WEBSOCKET_RECONNECT_INT) {
       Serial.println(F("Reconnecting WebSocket..."));
-      webSocket.begin(SERVER_HOST, SERVER_PORT, "/ws");
+      webSocket.beginSSL(SERVER_HOST, SERVER_PORT, "/ws");
       lastWebSocketReconnect = millis();
     }
   }
