@@ -25,7 +25,6 @@
  *    • SENSOR FAULT error (ACS712 issues)
  * ✅ WARNING DISPLAYS: Shows warnings on LCD
  *    • OVERVOLTAGE warning (>250V)
- *    • BROWNOUT warning (<180V)
  *    • UNDERVOLTAGE warning (<200V)
  *    • OVERCURRENT warning (>4.5A)
  * ✅ UPTIME TIMER: Shows system runtime in HH:MM:SS format
@@ -36,7 +35,7 @@
  * ✅ Voltage divider configured (10kΩ + 20kΩ)
  * ✅ ST7789 240x240 display with Adafruit library (better GMT130 support)
  * ✅ I2C LCD display (20x4 or 16x2) - shows voltage, current, kWh
- * ✅ Voltage buffer pre-fill (no false brownout)
+ * ✅ Voltage buffer pre-fill for stable readings
  * ✅ Current deadband (no phantom loads)
  * ✅ Startup settling period
  * ✅ Philippine Peso cost tracking
@@ -48,7 +47,6 @@
  * - SSRs only turn OFF during safety events:
  *   • Overcurrent (>4.5A for 1 second)
  *   • Overvoltage (>250V for 0.5 seconds)
- *   • Brownout (<180V for 2 seconds)
  *   • Sensor faults
  *   • Electric shock detection
  * - Manual control: Use 'on 1/2' or 'off 1/2' commands
@@ -170,8 +168,6 @@ WiFiClientSecure secureClient;
 #define OVERCURRENT_TIME    1000
 #define OVERVOLTAGE_TIME    500
 #define SAFETY_DEBOUNCE_COUNT 5
-#define BROWNOUT_VOLTAGE    180.0
-#define BROWNOUT_TIME       2000
 #define STARTUP_SETTLE_TIME 15000  // 15 seconds
 
 // ==================== SYSTEM CONFIGURATION ====================
@@ -310,10 +306,8 @@ int voltageBufferIndex = 0;
 
 bool overvoltageDetected = false;
 bool undervoltageDetected = false;
-bool brownoutDetected = false;
 int overvoltageDebounceCount = 0;
 unsigned long overvoltageStartTime = 0;
-unsigned long brownoutStartTime = 0;
 
 float maxVoltage = 0.0;
 float minVoltage = 999.0;
@@ -712,23 +706,6 @@ void updateLCDDisplay() {
     lcd.setCursor(0, 2);
     char buf[21];
     snprintf(buf, sizeof(buf), "V: %.1fV (>250V)    ", voltageReading);
-    lcd.print(buf);
-    lcd.setCursor(0, 3);
-    lcd.print("Relays OFF          ");
-    hasWarning = true;
-  }
-  else if (brownoutDetected) {
-    currentDisplayMode = 1;  // Warning mode
-    if (prevDisplayMode != currentDisplayMode) lcd.clear();
-
-    // BROWNOUT WARNING
-    lcd.setCursor(0, 0);
-    lcd.print("*** WARNING ***     ");
-    lcd.setCursor(0, 1);
-    lcd.print("BROWNOUT!           ");
-    lcd.setCursor(0, 2);
-    char buf[21];
-    snprintf(buf, sizeof(buf), "V: %.1fV (<180V)    ", voltageReading);
     lcd.print(buf);
     lcd.setCursor(0, 3);
     lcd.print("Relays OFF          ");
@@ -1681,26 +1658,6 @@ void performSafetyChecks() {
   } else {
     undervoltageDetected = false;
   }
-  
-  if (avgVoltage < BROWNOUT_VOLTAGE && avgVoltage > MIN_VALID_VOLTAGE) {
-    if (!brownoutDetected) {
-      brownoutDetected = true;
-      brownoutStartTime = millis();
-      Serial.printf("⚠️  Brownout: %.1fV\n", avgVoltage);
-    }
-    
-    if (millis() - brownoutStartTime > BROWNOUT_TIME) {
-      handleBrownout();
-    }
-  } else {
-    brownoutDetected = false;
-  }
-}
-
-// ==================== BROWNOUT HANDLER ====================
-void handleBrownout() {
-  Serial.println(F("⚠️  Extended brownout - protecting loads"));
-  disableAllChannels();
 }
 
 // ==================== SAFETY SHUTDOWN ====================
@@ -1950,7 +1907,7 @@ void updateStatusLEDs() {
 
   // Check for voltage issues (BLUE LED)
   // Turn on for 20 seconds, then turn off if fault clears
-  bool anyVoltageIssue = overvoltageDetected || undervoltageDetected || brownoutDetected;
+  bool anyVoltageIssue = overvoltageDetected || undervoltageDetected;
 
   if (anyVoltageIssue) {
     if (blueLedOnTime == 0) {
@@ -2096,7 +2053,6 @@ void emergencyReset() {
   
   overvoltageDetected = false;
   undervoltageDetected = false;
-  brownoutDetected = false;
   overvoltageDebounceCount = 0;
   criticalError = false;
 
@@ -2650,8 +2606,7 @@ void printDiagnostics() {
   Serial.printf("Manual: %s\n", manualControl ? "YES" : "NO");
   Serial.printf("Overvoltage: %s\n", overvoltageDetected ? "DETECTED" : "OK");
   Serial.printf("Undervoltage: %s\n", undervoltageDetected ? "DETECTED" : "OK");
-  Serial.printf("Brownout: %s\n", brownoutDetected ? "DETECTED" : "OK");
-  
+
   for (int ch = 0; ch < NUM_CHANNELS; ch++) {
     Serial.printf("%s Overcurrent: %s\n", channels[ch].name, 
                   channels[ch].overcurrentDetected ? "DETECTED" : "OK");
