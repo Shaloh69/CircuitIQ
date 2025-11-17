@@ -185,6 +185,7 @@ WiFiClientSecure secureClient;
 #define SERIAL_RX_BUFFER    256
 #define EEPROM_SIZE         512
 #define EEPROM_MAGIC        0xDEADC0DE
+#define LED_TIMEOUT_MS      20000  // 20 seconds - LED timeout for non-critical faults
 
 // ==================== DISPLAY CONFIGURATION ====================
 #define TFT_UPDATE_INTERVAL 1000
@@ -284,6 +285,11 @@ bool lcdInitialized = false;
 // ✅ ADD THESE NEW VARIABLES:
 int serverErrorCount = 0;
 int serverSuccessCount = 0;
+
+// LED timing variables
+unsigned long yellowLedOnTime = 0;  // Track when YELLOW LED was turned on
+unsigned long blueLedOnTime = 0;    // Track when BLUE LED was turned on
+bool sensorFaultPersistent = false; // Track if RED LED should stay on until manual reset
 
 // Create Adafruit display object (software SPI - no CS pin for GMT130)
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_DC, TFT_RST, TFT_MOSI, TFT_SCLK);
@@ -1734,20 +1740,35 @@ void triggerSafetyShutdown(int channel, const char* reason) {
 // ==================== CHANNEL CONTROL ====================
 void enableChannel(int channel) {
   if (channel < 0 || channel >= NUM_CHANNELS) return;
-  
+
   if (!isSafeToOperate(channel)) {
     return;
   }
-  
+
   channels[channel].relayEnabled = true;
   channels[channel].relayCommandState = true;
   digitalWrite(channels[channel].relayPin, RELAY_ON_STATE);
   delay(100);  // Let relay settle
-  Serial.printf("Relay %d actual state: %s\n", 
-    channel, 
+  Serial.printf("Relay %d actual state: %s\n",
+    channel,
     digitalRead(channels[channel].relayPin) == RELAY_ON_STATE ? "ON" : "OFF"
   );
   Serial.printf("✓ %s ENABLED\n", channels[channel].name);
+
+  // Clear sensor fault for this channel and check if we should clear persistent flag
+  channels[channel].sensorFaultDetected = false;
+
+  // Clear persistent flag if no channels have sensor faults
+  bool anyFault = false;
+  for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+    if (channels[ch].sensorFaultDetected) {
+      anyFault = true;
+      break;
+    }
+  }
+  if (!anyFault) {
+    sensorFaultPersistent = false;
+  }
 }
 
 void disableChannel(int channel) {
@@ -1850,6 +1871,7 @@ void updatePerformanceMetrics(unsigned long loopTime) {
 void updateStatusLEDs() {
   static unsigned long lastBlink = 0;
   static bool blinkState = false;
+  unsigned long currentTime = millis();
 
   // Turn off all LEDs first
   digitalWrite(RED_LED_PIN, LOW);
@@ -1858,45 +1880,97 @@ void updateStatusLEDs() {
   digitalWrite(BLUE_LED_PIN, LOW);
 
   // Check for sensor faults (highest priority - RED LED)
+  // Sensor faults = short circuits - keep LED on until manual SSR turn on
   bool anySensorFault = false;
   for (int ch = 0; ch < NUM_CHANNELS; ch++) {
     if (channels[ch].sensorFaultDetected) {
       anySensorFault = true;
+      sensorFaultPersistent = true;  // Mark that we had a sensor fault
       break;
     }
   }
 
-  if (anySensorFault) {
-    // RED LED: Blink for sensor faults/short circuit
-    if (millis() - lastBlink > 250) {
+  // Keep RED LED on if we had a sensor fault and channels are still disabled
+  bool anyChannelDisabledDueToFault = false;
+  for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+    if (channels[ch].sensorFaultDetected && !channels[ch].relayEnabled) {
+      anyChannelDisabledDueToFault = true;
+      break;
+    }
+  }
+
+  if (anyChannelDisabledDueToFault || (sensorFaultPersistent && !channels[0].relayEnabled && !channels[1].relayEnabled)) {
+    // RED LED: Blink continuously for sensor faults/short circuit until manual reset
+    if (currentTime - lastBlink > 250) {
       blinkState = !blinkState;
-      lastBlink = millis();
+      lastBlink = currentTime;
+    }
+    digitalWrite(RED_LED_PIN, blinkState);
+    return;
+  } else if (anySensorFault) {
+    // Fault detected but channels are enabled - show briefly
+    if (currentTime - lastBlink > 250) {
+      blinkState = !blinkState;
+      lastBlink = currentTime;
     }
     digitalWrite(RED_LED_PIN, blinkState);
     return;
   }
 
   // Check for overcurrent (YELLOW LED - overload)
+  // Turn on for 20 seconds, then turn off if fault clears
   bool anyOvercurrent = false;
   for (int ch = 0; ch < NUM_CHANNELS; ch++) {
     if (channels[ch].overcurrentDetected) {
       anyOvercurrent = true;
+      if (yellowLedOnTime == 0) {
+        yellowLedOnTime = currentTime;  // Start timer
+      }
       break;
     }
   }
 
   if (anyOvercurrent) {
-    // YELLOW LED: Solid for overcurrent/overload
-    digitalWrite(YELLOW_LED_PIN, HIGH);
-    return;
+    // YELLOW LED: Solid for overcurrent/overload (20 second timeout)
+    if (currentTime - yellowLedOnTime < LED_TIMEOUT_MS) {
+      digitalWrite(YELLOW_LED_PIN, HIGH);
+      return;
+    }
+    // Timeout expired but fault still present - turn off LED
+    yellowLedOnTime = 0;
+  } else {
+    // No overcurrent - show LED for 20 seconds after fault clears
+    if (yellowLedOnTime > 0 && currentTime - yellowLedOnTime < LED_TIMEOUT_MS) {
+      digitalWrite(YELLOW_LED_PIN, HIGH);
+      return;
+    } else {
+      yellowLedOnTime = 0;  // Reset timer
+    }
   }
 
   // Check for voltage issues (BLUE LED)
-  float avgVoltage = getAverageVoltage();
-  if (overvoltageDetected || undervoltageDetected || brownoutDetected) {
-    // BLUE LED: Solid for under/overvoltage
-    digitalWrite(BLUE_LED_PIN, HIGH);
-    return;
+  // Turn on for 20 seconds, then turn off if fault clears
+  bool anyVoltageIssue = overvoltageDetected || undervoltageDetected || brownoutDetected;
+
+  if (anyVoltageIssue) {
+    if (blueLedOnTime == 0) {
+      blueLedOnTime = currentTime;  // Start timer
+    }
+    // BLUE LED: Solid for under/overvoltage (20 second timeout)
+    if (currentTime - blueLedOnTime < LED_TIMEOUT_MS) {
+      digitalWrite(BLUE_LED_PIN, HIGH);
+      return;
+    }
+    // Timeout expired but fault still present - turn off LED
+    blueLedOnTime = 0;
+  } else {
+    // No voltage issue - show LED for 20 seconds after fault clears
+    if (blueLedOnTime > 0 && currentTime - blueLedOnTime < LED_TIMEOUT_MS) {
+      digitalWrite(BLUE_LED_PIN, HIGH);
+      return;
+    } else {
+      blueLedOnTime = 0;  // Reset timer
+    }
   }
 
   // Check if any channel is enabled
@@ -1913,9 +1987,9 @@ void updateStatusLEDs() {
         digitalWrite(GREEN_LED_PIN, HIGH);
       } else {
         // GREEN LED: Blink when monitoring but relays disabled
-        if (millis() - lastBlink > 1000) {
+        if (currentTime - lastBlink > 1000) {
           blinkState = !blinkState;
-          lastBlink = millis();
+          lastBlink = currentTime;
         }
         digitalWrite(GREEN_LED_PIN, blinkState);
       }
@@ -1923,9 +1997,9 @@ void updateStatusLEDs() {
 
     case STATE_ERROR:
       // RED LED: Blink for general errors
-      if (millis() - lastBlink > 250) {
+      if (currentTime - lastBlink > 250) {
         blinkState = !blinkState;
-        lastBlink = millis();
+        lastBlink = currentTime;
       }
       digitalWrite(RED_LED_PIN, blinkState);
       break;
