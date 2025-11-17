@@ -61,6 +61,11 @@
  * - Relay CH1: GPIO16
  * - Relay CH2: GPIO17
  * - I2C LCD: SDA→21, SCL→22, VCC→5V, GND→GND
+ * - LED Indicators:
+ *   • RED LED (GPIO2): Short circuit / Sensor faults
+ *   • YELLOW LED (GPIO27): Overload (overcurrent >4.5A)
+ *   • GREEN LED (GPIO4): Normal operation
+ *   • BLUE LED (GPIO5): Under/Overvoltage conditions
  */
 
 #include <EEPROM.h>
@@ -100,9 +105,11 @@ WiFiClientSecure secureClient;
 #define ZMPT101B_PIN        35
 #define RELAY_CH1_PIN       16
 #define RELAY_CH2_PIN       17
-#define RED_LED_PIN         2
-#define GREEN_LED_PIN       4
-#define BUZZER_PIN          19     
+#define RED_LED_PIN         2       // Short circuit / Sensor faults
+#define YELLOW_LED_PIN      27      // Overload (overcurrent)
+#define GREEN_LED_PIN       4       // Normal operation
+#define BLUE_LED_PIN        5       // Under/Overvoltage
+#define BUZZER_PIN          19
 #define SD_CS_PIN           15
 #define TFT_BL_PIN          33
 
@@ -458,13 +465,17 @@ void setup() {
   pinMode(channels[CHANNEL_1].relayPin, OUTPUT);
   pinMode(channels[CHANNEL_2].relayPin, OUTPUT);
   pinMode(RED_LED_PIN, OUTPUT);
+  pinMode(YELLOW_LED_PIN, OUTPUT);
   pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(BLUE_LED_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
-  
+
   digitalWrite(channels[CHANNEL_1].relayPin, RELAY_OFF_STATE);
   digitalWrite(channels[CHANNEL_2].relayPin, RELAY_OFF_STATE);
   digitalWrite(RED_LED_PIN, LOW);
+  digitalWrite(YELLOW_LED_PIN, LOW);
   digitalWrite(GREEN_LED_PIN, LOW);
+  digitalWrite(BLUE_LED_PIN, LOW);
   setBuzzer(false);  // Initialize buzzer OFF
   
   analogReadResolution(12);
@@ -1182,14 +1193,20 @@ void feedWatchdog() {
 // ==================== STARTUP SEQUENCE ====================
 void startupSequence() {
   Serial.println(F("\n=== DUAL CHANNEL INITIALIZATION ==="));
-  
+
   Serial.println(F("Testing LEDs..."));
   digitalWrite(RED_LED_PIN, HIGH);
-  delay(250);
+  delay(200);
   digitalWrite(RED_LED_PIN, LOW);
+  digitalWrite(YELLOW_LED_PIN, HIGH);
+  delay(200);
+  digitalWrite(YELLOW_LED_PIN, LOW);
   digitalWrite(GREEN_LED_PIN, HIGH);
-  delay(250);
+  delay(200);
   digitalWrite(GREEN_LED_PIN, LOW);
+  digitalWrite(BLUE_LED_PIN, HIGH);
+  delay(200);
+  digitalWrite(BLUE_LED_PIN, LOW);
   
   if (buzzerEnabled) {
     Serial.println(F("Testing buzzer..."));
@@ -1359,11 +1376,11 @@ void autoCalibrateSensorsNonBlocking() {
         }
         
         saveCalibrationData();
-        
+
         Serial.println(F("\n✓ System ready for operation"));
         currentState = STATE_MONITORING;
         calState = CAL_COMPLETE;
-        digitalWrite(GREEN_LED_PIN, HIGH);
+        // LED will be controlled by updateStatusLEDs()
       }
       break;
       
@@ -1683,16 +1700,15 @@ void handleBrownout() {
 // ==================== SAFETY SHUTDOWN ====================
 void triggerSafetyShutdown(int channel, const char* reason) {
   if (channel < 0 || channel >= NUM_CHANNELS) return;
-  
+
   Serial.printf("\n🚨 SAFETY SHUTDOWN: %s - %s\n", channels[channel].name, reason);
-  
+
   disableChannel(channel);
-  
+
   currentState = STATE_ERROR;
   channels[channel].shutdownCount++;
-  
-  digitalWrite(RED_LED_PIN, HIGH);
-  digitalWrite(GREEN_LED_PIN, LOW);
+
+  // LEDs will be controlled by updateStatusLEDs()
   
   if (buzzerEnabled) {
     for (int i = 0; i < 3; i++) {
@@ -1834,44 +1850,93 @@ void updatePerformanceMetrics(unsigned long loopTime) {
 void updateStatusLEDs() {
   static unsigned long lastBlink = 0;
   static bool blinkState = false;
-  
+
+  // Turn off all LEDs first
+  digitalWrite(RED_LED_PIN, LOW);
+  digitalWrite(YELLOW_LED_PIN, LOW);
+  digitalWrite(GREEN_LED_PIN, LOW);
+  digitalWrite(BLUE_LED_PIN, LOW);
+
+  // Check for sensor faults (highest priority - RED LED)
+  bool anySensorFault = false;
+  for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+    if (channels[ch].sensorFaultDetected) {
+      anySensorFault = true;
+      break;
+    }
+  }
+
+  if (anySensorFault) {
+    // RED LED: Blink for sensor faults/short circuit
+    if (millis() - lastBlink > 250) {
+      blinkState = !blinkState;
+      lastBlink = millis();
+    }
+    digitalWrite(RED_LED_PIN, blinkState);
+    return;
+  }
+
+  // Check for overcurrent (YELLOW LED - overload)
+  bool anyOvercurrent = false;
+  for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+    if (channels[ch].overcurrentDetected) {
+      anyOvercurrent = true;
+      break;
+    }
+  }
+
+  if (anyOvercurrent) {
+    // YELLOW LED: Solid for overcurrent/overload
+    digitalWrite(YELLOW_LED_PIN, HIGH);
+    return;
+  }
+
+  // Check for voltage issues (BLUE LED)
+  float avgVoltage = getAverageVoltage();
+  if (overvoltageDetected || undervoltageDetected || brownoutDetected) {
+    // BLUE LED: Solid for under/overvoltage
+    digitalWrite(BLUE_LED_PIN, HIGH);
+    return;
+  }
+
+  // Check if any channel is enabled
   bool anyEnabled = false;
   for (int ch = 0; ch < NUM_CHANNELS; ch++) {
     if (channels[ch].relayEnabled) anyEnabled = true;
   }
-  
+
+  // Normal operation states
   switch (currentState) {
     case STATE_MONITORING:
       if (anyEnabled) {
+        // GREEN LED: Solid for normal operation
         digitalWrite(GREEN_LED_PIN, HIGH);
-        digitalWrite(RED_LED_PIN, LOW);
       } else {
+        // GREEN LED: Blink when monitoring but relays disabled
         if (millis() - lastBlink > 1000) {
           blinkState = !blinkState;
-          digitalWrite(GREEN_LED_PIN, blinkState);
           lastBlink = millis();
         }
-        digitalWrite(RED_LED_PIN, LOW);
+        digitalWrite(GREEN_LED_PIN, blinkState);
       }
       break;
-      
+
     case STATE_ERROR:
+      // RED LED: Blink for general errors
       if (millis() - lastBlink > 250) {
         blinkState = !blinkState;
-        digitalWrite(RED_LED_PIN, blinkState);
         lastBlink = millis();
       }
-      digitalWrite(GREEN_LED_PIN, LOW);
+      digitalWrite(RED_LED_PIN, blinkState);
       break;
-      
+
     case STATE_MANUAL_CONTROL:
+      // GREEN LED: Solid in manual control mode
       digitalWrite(GREEN_LED_PIN, HIGH);
-      digitalWrite(RED_LED_PIN, HIGH);
       break;
-      
+
     default:
-      digitalWrite(GREEN_LED_PIN, LOW);
-      digitalWrite(RED_LED_PIN, LOW);
+      // All LEDs off for unknown states
       break;
   }
 }
@@ -1960,10 +2025,9 @@ void emergencyReset() {
   brownoutDetected = false;
   overvoltageDebounceCount = 0;
   criticalError = false;
-  
-  digitalWrite(RED_LED_PIN, LOW);
-  digitalWrite(GREEN_LED_PIN, HIGH);
-  
+
+  // LEDs will be controlled by updateStatusLEDs()
+
   Serial.println(F("Recalibrating..."));
   calProgress.samplesCollected = 0;
   calProgress.ch1CurrentSum = 0.0;
