@@ -470,13 +470,21 @@ void setup() {
   pinMode(BLUE_LED_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
 
+  // CRITICAL: Set buzzer pin to OFF state immediately to prevent startup beeping
+  // If inverted (NPN transistor), OFF = HIGH; otherwise OFF = LOW
+  digitalWrite(BUZZER_PIN, buzzerInverted ? HIGH : LOW);
+  Serial.printf("[INIT] Buzzer pin %d set to %s (Inverted=%s)\n",
+    BUZZER_PIN,
+    (buzzerInverted ? "HIGH" : "LOW"),
+    (buzzerInverted ? "YES" : "NO"));
+
   digitalWrite(channels[CHANNEL_1].relayPin, RELAY_OFF_STATE);
   digitalWrite(channels[CHANNEL_2].relayPin, RELAY_OFF_STATE);
   digitalWrite(RED_LED_PIN, LOW);
   digitalWrite(YELLOW_LED_PIN, LOW);
   digitalWrite(GREEN_LED_PIN, LOW);
   digitalWrite(BLUE_LED_PIN, LOW);
-  setBuzzer(false);  // Initialize buzzer OFF
+  setBuzzer(false);  // Initialize buzzer OFF (will log state)
   
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
@@ -617,9 +625,22 @@ void setTFTBrightness(uint8_t brightness) {
 
 // ==================== BUZZER CONTROL WITH POLARITY SUPPORT ====================
 void setBuzzer(bool state) {
+  if (!buzzerEnabled) {
+    // Force buzzer off when disabled
+    digitalWrite(BUZZER_PIN, buzzerInverted ? HIGH : LOW);
+    return;
+  }
+
   // If buzzer is inverted (NPN transistor causing active-LOW behavior), flip the state
   bool actualState = buzzerInverted ? !state : state;
-  digitalWrite(BUZZER_PIN, actualState ? HIGH : LOW);
+  int pinValue = actualState ? HIGH : LOW;
+  digitalWrite(BUZZER_PIN, pinValue);
+
+  // Log buzzer state changes
+  Serial.printf("[BUZZER] State=%s, Inverted=%s, PinValue=%s\n",
+    state ? "ON" : "OFF",
+    buzzerInverted ? "YES" : "NO",
+    pinValue == HIGH ? "HIGH" : "LOW");
 }
 
 // ==================== INITIALIZE I2C LCD ====================
@@ -1192,7 +1213,9 @@ void startupSequence() {
   digitalWrite(BLUE_LED_PIN, LOW);
   
   if (buzzerEnabled) {
-    Serial.println(F("Testing buzzer..."));
+    Serial.println(F("[STARTUP] Testing buzzer (2 quick beeps)..."));
+    Serial.printf("[STARTUP] Buzzer config before test: Pin=%d, Inverted=%s\n",
+      BUZZER_PIN, buzzerInverted ? "YES" : "NO");
     setBuzzer(true);
     delay(100);
     setBuzzer(false);
@@ -1200,6 +1223,9 @@ void startupSequence() {
     setBuzzer(true);
     delay(100);
     setBuzzer(false);
+    Serial.println(F("[STARTUP] Buzzer test complete"));
+  } else {
+    Serial.println(F("[STARTUP] Buzzer test skipped - buzzer disabled"));
   }
   
   Serial.println(F("✓ Hardware test complete"));
@@ -1665,6 +1691,7 @@ void triggerSafetyShutdown(int channel, const char* reason) {
   if (channel < 0 || channel >= NUM_CHANNELS) return;
 
   Serial.printf("\n🚨 SAFETY SHUTDOWN: %s - %s\n", channels[channel].name, reason);
+  Serial.printf("[SHUTDOWN] Time=%lu, Channel=%d, Reason=%s\n", millis(), channel, reason);
 
   disableChannel(channel);
 
@@ -1672,15 +1699,20 @@ void triggerSafetyShutdown(int channel, const char* reason) {
   channels[channel].shutdownCount++;
 
   // LEDs will be controlled by updateStatusLEDs()
-  
+
   if (buzzerEnabled) {
+    Serial.println("[BUZZER] Playing shutdown alert (3 beeps)");
     for (int i = 0; i < 3; i++) {
+      Serial.printf("[BUZZER] Beep %d/3\n", i + 1);
       setBuzzer(true);
       delay(150);
       setBuzzer(false);
       delay(100);
       feedWatchdog();
     }
+    Serial.println("[BUZZER] Shutdown alert complete");
+  } else {
+    Serial.println("[BUZZER] Buzzer disabled - no alert played");
   }
   
   if (sdCardAvailable) {
@@ -2256,19 +2288,49 @@ void processCommand(const char* command) {
   }
   else if (strcmp(command, "buzzer") == 0) {
     buzzerEnabled = !buzzerEnabled;
-    Serial.printf("Buzzer: %s\n", buzzerEnabled ? "ON" : "OFF");
+    Serial.printf("[CMD] Buzzer %s\n", buzzerEnabled ? "ENABLED" : "DISABLED");
+    // Force buzzer off when disabled
+    if (!buzzerEnabled) {
+      digitalWrite(BUZZER_PIN, buzzerInverted ? HIGH : LOW);
+      Serial.println("[CMD] Buzzer forced OFF");
+    }
   }
   else if (strcmp(command, "buzzer_invert") == 0) {
     buzzerInverted = !buzzerInverted;
-    Serial.printf("Buzzer Polarity: %s (set to %s if buzzer beeps continuously)\n",
-                  buzzerInverted ? "INVERTED" : "NORMAL",
-                  buzzerInverted ? "INVERTED" : "NORMAL");
+    Serial.printf("[CMD] Buzzer Polarity: %s\n",
+                  buzzerInverted ? "INVERTED (NPN)" : "NORMAL");
+    Serial.println("[CMD] Tip: Use this if buzzer beeps when it should be silent");
+    // Force off first, then test
+    digitalWrite(BUZZER_PIN, buzzerInverted ? HIGH : LOW);
+    delay(200);
     // Test the new setting with a quick beep
     if (buzzerEnabled) {
+      Serial.println("[CMD] Testing new polarity setting...");
       setBuzzer(true);
-      delay(100);
+      delay(150);
       setBuzzer(false);
     }
+  }
+  else if (strcmp(command, "buzzer_status") == 0) {
+    Serial.println(F("\n=== BUZZER STATUS ==="));
+    Serial.printf("Pin: %d\n", BUZZER_PIN);
+    Serial.printf("Enabled: %s\n", buzzerEnabled ? "YES" : "NO");
+    Serial.printf("Inverted: %s\n", buzzerInverted ? "YES (active-LOW)" : "NO (active-HIGH)");
+    int pinState = digitalRead(BUZZER_PIN);
+    Serial.printf("Current Pin State: %s\n", pinState == HIGH ? "HIGH" : "LOW");
+    Serial.printf("Expected State (OFF): %s\n", buzzerInverted ? "HIGH" : "LOW");
+    if ((buzzerInverted && pinState == HIGH) || (!buzzerInverted && pinState == LOW)) {
+      Serial.println("Status: ✓ Buzzer should be OFF");
+    } else {
+      Serial.println("Status: ⚠️ WARNING - Buzzer may be ON!");
+    }
+    Serial.println(F("\nCommands:"));
+    Serial.println(F("  buzzer         - Toggle enable/disable"));
+    Serial.println(F("  buzzer_invert  - Toggle polarity (use if continuously beeping)"));
+    Serial.println(F("  buzzer_test    - Test buzzer with 3 beeps"));
+  }
+  else if (strcmp(command, "buzzer_test") == 0) {
+    testBuzzer();
   }
   else if (strcmp(command, "display") == 0) {
     displayEnabled = !displayEnabled;
@@ -2516,12 +2578,16 @@ void printMenu() {
   Serial.println(F("SETTINGS:"));
   Serial.println(F("  manual     - Toggle manual"));
   Serial.println(F("  safety     - Toggle safety"));
-  Serial.println(F("  buzzer     - Toggle buzzer"));
-  Serial.println(F("  buzzer_invert - Toggle buzzer polarity (fix continuous beeping)"));
   Serial.println(F("  display    - Toggle TFT"));
   Serial.println(F("  display_test - Test display"));
   Serial.println(F("  rate X     - Set ₱/kWh"));
   Serial.println(F("  clear      - Clear stats"));
+  Serial.println();
+  Serial.println(F("BUZZER (Audio Alerts):"));
+  Serial.println(F("  buzzer_status - Show buzzer configuration & state"));
+  Serial.println(F("  buzzer        - Toggle buzzer on/off"));
+  Serial.println(F("  buzzer_test   - Test buzzer (3 beeps)"));
+  Serial.println(F("  buzzer_invert - Toggle polarity (fix continuous beeping)"));
   Serial.println(F("========================================\n"));
 }
 
@@ -2787,18 +2853,24 @@ void logToSD(const char* data) {
 // ==================== BUZZER TEST ====================
 void testBuzzer() {
   if (!buzzerEnabled) {
-    Serial.println(F("Buzzer disabled"));
+    Serial.println(F("[BUZZER] Test skipped - buzzer disabled"));
     return;
   }
-  Serial.println(F("Testing buzzer..."));
+  Serial.println(F("[BUZZER] Starting buzzer test (3 beeps)..."));
+  Serial.printf("[BUZZER] Config: Pin=%d, Inverted=%s, Enabled=%s\n",
+    BUZZER_PIN,
+    buzzerInverted ? "YES" : "NO",
+    buzzerEnabled ? "YES" : "NO");
+
   for (int i = 0; i < 3; i++) {
+    Serial.printf("[BUZZER] Test beep %d/3...\n", i + 1);
     setBuzzer(true);
     delay(200);
     setBuzzer(false);
     delay(200);
     feedWatchdog();
   }
-  Serial.println(F("✓ Buzzer OK"));
+  Serial.println(F("[BUZZER] ✓ Test complete"));
 }
 
 // ==================== RAW DISPLAY TEST ====================
