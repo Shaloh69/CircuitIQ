@@ -15,9 +15,11 @@
 /*
  * ESP32 Dual-Channel Electrical Safety Monitor - VERSION v6.0 ENHANCED
  * 
- * MODIFIED FOR ACTIVE BUZZER (3-24V DC)
+ * MODIFIED FOR ACTIVE BUZZER WITH RELAY CONTROL (3-24V DC)
  * - Changed tone() calls to digitalWrite() for active buzzer compatibility
- * - Line 1076-1085: Buzzer now uses simple ON/OFF instead of frequency generation
+ * - Buzzer controlled via relay module (active-LOW trigger)
+ * - GPIO LOW energizes relay → buzzer ON
+ * - GPIO HIGH de-energizes relay → buzzer OFF
  * 
  * NEW LCD ENHANCEMENTS (v5.5):
  * ✅ ERROR DISPLAYS: Shows critical errors on LCD
@@ -58,6 +60,7 @@
  * - ZMPT101B: OUT→GPIO35
  * - Relay CH1: GPIO16
  * - Relay CH2: GPIO17
+ * - Buzzer Relay: GPIO19 (IN) - Active-LOW relay module controlling 3-24V buzzer
  * - I2C LCD: SDA→21, SCL→22, VCC→5V, GND→GND
  * - LED Indicators:
  *   • RED LED (GPIO2): Short circuit / Sensor faults
@@ -268,7 +271,7 @@ CalibrationState calState = CAL_IDLE;
 bool manualControl = false;
 bool safetyEnabled = true;
 bool buzzerEnabled = true;
-bool buzzerInverted = true;  // Set to true if NPN transistor causes buzzer to beep when GPIO is LOW
+bool buzzerInverted = true;  // Set to true for active-LOW relay modules (GPIO LOW = relay ON = buzzer ON)
 bool sdCardAvailable = false;
 bool wifiConnected = false;
 bool serverConnected = false;
@@ -471,7 +474,7 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
 
   // CRITICAL: Set buzzer pin to OFF state immediately to prevent startup beeping
-  // If inverted (NPN transistor), OFF = HIGH; otherwise OFF = LOW
+  // If using active-LOW relay, OFF = HIGH (relay de-energized); otherwise OFF = LOW
   digitalWrite(BUZZER_PIN, buzzerInverted ? HIGH : LOW);
   Serial.printf("[INIT] Buzzer pin %d set to %s (Inverted=%s)\n",
     BUZZER_PIN,
@@ -631,7 +634,8 @@ void setBuzzer(bool state) {
     return;
   }
 
-  // If buzzer is inverted (NPN transistor causing active-LOW behavior), flip the state
+  // If buzzer uses active-LOW relay (most relay modules), flip the state
+  // Active-LOW relay: GPIO LOW energizes relay coil, GPIO HIGH de-energizes
   bool actualState = buzzerInverted ? !state : state;
   int pinValue = actualState ? HIGH : LOW;
   digitalWrite(BUZZER_PIN, pinValue);
@@ -2298,7 +2302,7 @@ void processCommand(const char* command) {
   else if (strcmp(command, "buzzer_invert") == 0) {
     buzzerInverted = !buzzerInverted;
     Serial.printf("[CMD] Buzzer Polarity: %s\n",
-                  buzzerInverted ? "INVERTED (NPN)" : "NORMAL");
+                  buzzerInverted ? "INVERTED (Active-LOW Relay)" : "NORMAL (Active-HIGH)");
     Serial.println("[CMD] Tip: Use this if buzzer beeps when it should be silent");
     // Force off first, then test
     digitalWrite(BUZZER_PIN, buzzerInverted ? HIGH : LOW);
