@@ -145,7 +145,7 @@ WiFiClientSecure secureClient;
 #define EXPECTED_OFFSET_MIN 1.35
 #define EXPECTED_OFFSET_MAX 1.95
 #define MAX_VALID_CURRENT   6.0
-#define CURRENT_DEADBAND    0.08  // Ignore currents below this
+#define CURRENT_DEADBAND    0.02  // Ignore currents below this (reduced from 0.08 to detect lower currents)
 
 // ==================== ZMPT101B CONFIGURATION ====================
 #define ZMPT101B_SENSITIVITY 0.0125
@@ -271,7 +271,8 @@ CalibrationState calState = CAL_IDLE;
 bool manualControl = false;
 bool safetyEnabled = true;
 bool buzzerEnabled = true;
-bool buzzerInverted = true;  // Set to true for active-LOW relay modules (GPIO LOW = relay ON = buzzer ON)
+bool buzzerInverted = false;  // Set to true for active-LOW relay, false for active-HIGH relay (try switching if buzzer doesn't work)
+bool currentSensorDebug = true;  // Enable detailed current sensor logging (disable after troubleshooting)
 bool sdCardAvailable = false;
 bool wifiConnected = false;
 bool serverConnected = false;
@@ -636,15 +637,18 @@ void setBuzzer(bool state) {
 
   // If buzzer uses active-LOW relay (most relay modules), flip the state
   // Active-LOW relay: GPIO LOW energizes relay coil, GPIO HIGH de-energizes
+  // Active-HIGH relay: GPIO HIGH energizes relay coil, GPIO LOW de-energizes
   bool actualState = buzzerInverted ? !state : state;
   int pinValue = actualState ? HIGH : LOW;
   digitalWrite(BUZZER_PIN, pinValue);
 
-  // Log buzzer state changes
-  Serial.printf("[BUZZER] State=%s, Inverted=%s, PinValue=%s\n",
-    state ? "ON" : "OFF",
-    buzzerInverted ? "YES" : "NO",
-    pinValue == HIGH ? "HIGH" : "LOW");
+  // Enhanced logging for relay diagnostics
+  Serial.println("======================================");
+  Serial.printf("[BUZZER] Requested State: %s\n", state ? "ON" : "OFF");
+  Serial.printf("[BUZZER] Inverted Mode: %s\n", buzzerInverted ? "YES (active-LOW)" : "NO (active-HIGH)");
+  Serial.printf("[BUZZER] GPIO Pin %d: %s\n", BUZZER_PIN, pinValue == HIGH ? "HIGH" : "LOW");
+  Serial.printf("[BUZZER] Expected Behavior: Relay should be %s\n", state ? "ENERGIZED (buzzer ON)" : "DE-ENERGIZED (buzzer OFF)");
+  Serial.println("======================================");
 }
 
 // ==================== INITIALIZE I2C LCD ====================
@@ -1518,12 +1522,21 @@ void readSensors() {
   
   for (int ch = 0; ch < NUM_CHANNELS; ch++) {
     float rawCurrent = calculateRMSCurrent(ch);
-    
-    // Apply deadband
+
+    // Debug logging for current sensor diagnostics
+    if (currentSensorDebug && rawCurrent > 0.001) {  // Log if any current detected
+      Serial.printf("[CURRENT DEBUG] %s Raw: %.3fA | Deadband: %.2fA | Offset: %.3fV\n",
+                    channels[ch].name, rawCurrent, CURRENT_DEADBAND, channels[ch].currentOffset);
+    }
+
+    // Apply deadband to filter noise
     if (rawCurrent < CURRENT_DEADBAND) {
+      if (currentSensorDebug && rawCurrent > 0.001) {
+        Serial.printf("[CURRENT DEBUG] %s filtered to 0.00A (below deadband)\n", channels[ch].name);
+      }
       rawCurrent = 0.0;
     }
-    
+
     channels[ch].currentReading = rawCurrent;
     
     if (channels[ch].currentReading > MAX_VALID_CURRENT) {
@@ -2336,6 +2349,35 @@ void processCommand(const char* command) {
   else if (strcmp(command, "buzzer_test") == 0) {
     testBuzzer();
   }
+  else if (strcmp(command, "current_debug") == 0) {
+    currentSensorDebug = !currentSensorDebug;
+    Serial.printf("[CMD] Current Sensor Debug: %s\n", currentSensorDebug ? "ENABLED" : "DISABLED");
+    if (currentSensorDebug) {
+      Serial.println("[CMD] Will show raw current readings and deadband filtering");
+      Serial.println("[CMD] Use this to diagnose current sensor issues");
+    }
+  }
+  else if (strcmp(command, "current_status") == 0) {
+    Serial.println(F("\n=== CURRENT SENSOR STATUS ==="));
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+      Serial.printf("\n%s (Pin %d):\n", channels[ch].name, channels[ch].currentSensorPin);
+      Serial.printf("  Current Reading: %.3fA\n", channels[ch].currentReading);
+      Serial.printf("  Current Offset: %.3fV\n", channels[ch].currentOffset);
+      Serial.printf("  Current Calibration: %.3f\n", channels[ch].currentCalibration);
+      Serial.printf("  Deadband Threshold: %.2fA\n", CURRENT_DEADBAND);
+
+      // Take a quick raw reading
+      float testReading = calculateRMSCurrent(ch);
+      Serial.printf("  Test Reading (now): %.3fA\n", testReading);
+      if (testReading < CURRENT_DEADBAND && testReading > 0.001) {
+        Serial.printf("  ⚠️  Reading %.3fA is below deadband (%.2fA) - will show as 0A\n",
+                      testReading, CURRENT_DEADBAND);
+      }
+    }
+    Serial.println(F("\nCommands:"));
+    Serial.println(F("  current_debug  - Toggle detailed current sensor logging"));
+    Serial.println(F("  current_status - Show this status"));
+  }
   else if (strcmp(command, "display") == 0) {
     displayEnabled = !displayEnabled;
     Serial.printf("Display: %s\n", displayEnabled ? "ON" : "OFF");
@@ -2592,6 +2634,10 @@ void printMenu() {
   Serial.println(F("  buzzer        - Toggle buzzer on/off"));
   Serial.println(F("  buzzer_test   - Test buzzer (3 beeps)"));
   Serial.println(F("  buzzer_invert - Toggle polarity (fix continuous beeping)"));
+  Serial.println();
+  Serial.println(F("CURRENT SENSOR DIAGNOSTICS:"));
+  Serial.println(F("  current_status - Show current sensor readings & config"));
+  Serial.println(F("  current_debug  - Toggle detailed current sensor logging"));
   Serial.println(F("========================================\n"));
 }
 
