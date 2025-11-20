@@ -202,6 +202,11 @@ WiFiClientSecure secureClient;
 #define RELAY_VERIFY_INTERVAL 5000
 #define RELAY_TURNOFF_DELAY 1400  // Delay before turning OFF relay (ms) - prevents chatter, allows load settling
 
+// ==================== BUZZER CONFIGURATION ====================
+#define BUZZER_BEEP_ON_MS   250   // Buzzer ON duration (ms) - increased from 150ms
+#define BUZZER_BEEP_OFF_MS  200   // Buzzer OFF duration between beeps (ms) - increased from 100ms
+#define BUZZER_CONTINUOUS_CYCLE_MS 450  // Total cycle time for continuous beeping (ON + OFF)
+
 // ==================== SAFETY THRESHOLDS ====================
 #define MAX_CURRENT         4.5
 #define MAX_VOLTAGE         250.0
@@ -312,6 +317,9 @@ bool manualControl = false;
 bool safetyEnabled = true;
 bool buzzerEnabled = true;
 bool buzzerInverted = false;  // Set to true for active-LOW relay, false for active-HIGH relay (try switching if buzzer doesn't work)
+bool buzzerContinuousBeep = false;  // Continuous beeping during anomalies
+unsigned long buzzerLastToggle = 0;  // Timestamp for continuous beep timing
+bool buzzerContinuousState = false;  // Current state of continuous beep (ON/OFF)
 bool currentSensorDebug = true;  // Enable detailed current sensor logging (disable after troubleshooting)
 bool sdCardAvailable = false;
 bool wifiConnected = false;
@@ -441,6 +449,10 @@ void updateCostCalculation();
 void updateStatistics();
 void updateStatusLEDs();
 void setBuzzer(bool state);
+void playBuzzerBeeps(int count);
+void updateContinuousBuzzer();
+void startContinuousBuzzer();
+void stopContinuousBuzzer();
 void updateDisplay();
 void initTFTDisplay();
 void updateTFTDisplay();
@@ -689,6 +701,74 @@ void setBuzzer(bool state) {
   Serial.printf("[BUZZER] GPIO Pin %d: %s\n", BUZZER_PIN, pinValue == HIGH ? "HIGH" : "LOW");
   Serial.printf("[BUZZER] Expected Behavior: Relay should be %s\n", state ? "ENERGIZED (buzzer ON)" : "DE-ENERGIZED (buzzer OFF)");
   Serial.println("======================================");
+}
+
+// ==================== BUZZER BEEP PATTERNS ====================
+void playBuzzerBeeps(int count) {
+  if (!buzzerEnabled) {
+    Serial.println("[BUZZER] Beep skipped - buzzer disabled");
+    return;
+  }
+
+  Serial.printf("[BUZZER] Playing %d beep(s) - Pattern: %dms ON, %dms OFF\n",
+                count, BUZZER_BEEP_ON_MS, BUZZER_BEEP_OFF_MS);
+
+  for (int i = 0; i < count; i++) {
+    Serial.printf("[BUZZER] Beep %d/%d\n", i + 1, count);
+    setBuzzer(true);
+    delay(BUZZER_BEEP_ON_MS);
+    setBuzzer(false);
+    if (i < count - 1) {  // Don't delay after last beep
+      delay(BUZZER_BEEP_OFF_MS);
+    }
+    feedWatchdog();
+  }
+}
+
+// ==================== CONTINUOUS BUZZER (FOR ANOMALIES) ====================
+void startContinuousBuzzer() {
+  if (!buzzerContinuousBeep) {
+    buzzerContinuousBeep = true;
+    buzzerLastToggle = millis();
+    buzzerContinuousState = false;
+    Serial.println("[BUZZER] Continuous beeping STARTED");
+  }
+}
+
+void stopContinuousBuzzer() {
+  if (buzzerContinuousBeep) {
+    buzzerContinuousBeep = false;
+    setBuzzer(false);  // Ensure buzzer is off
+    Serial.println("[BUZZER] Continuous beeping STOPPED");
+  }
+}
+
+void updateContinuousBuzzer() {
+  if (!buzzerContinuousBeep || !buzzerEnabled) {
+    if (buzzerContinuousBeep && !buzzerEnabled) {
+      setBuzzer(false);  // Ensure off if disabled
+    }
+    return;
+  }
+
+  unsigned long now = millis();
+  unsigned long elapsed = now - buzzerLastToggle;
+
+  if (buzzerContinuousState) {
+    // Currently ON - check if it's time to turn OFF
+    if (elapsed >= BUZZER_BEEP_ON_MS) {
+      setBuzzer(false);
+      buzzerContinuousState = false;
+      buzzerLastToggle = now;
+    }
+  } else {
+    // Currently OFF - check if it's time to turn ON
+    if (elapsed >= BUZZER_BEEP_OFF_MS) {
+      setBuzzer(true);
+      buzzerContinuousState = true;
+      buzzerLastToggle = now;
+    }
+  }
 }
 
 // ==================== INITIALIZE I2C LCD ====================
@@ -1046,7 +1126,8 @@ void loop() {
   }
   
   updateStatusLEDs();
-  
+  updateContinuousBuzzer();  // Non-blocking continuous beeping for anomalies
+
   if (sdCardAvailable && sensorsValid && (loopStart - lastLogUpdate >= LOG_INTERVAL_MS)) {
     char logBuffer[196];
     snprintf(logBuffer, sizeof(logBuffer), 
@@ -1260,21 +1341,11 @@ void startupSequence() {
   delay(200);
   digitalWrite(BLUE_LED_PIN, LOW);
   
-  if (buzzerEnabled) {
-    Serial.println(F("[STARTUP] Testing buzzer (2 quick beeps)..."));
-    Serial.printf("[STARTUP] Buzzer config before test: Pin=%d, Inverted=%s\n",
-      BUZZER_PIN, buzzerInverted ? "YES" : "NO");
-    setBuzzer(true);
-    delay(100);
-    setBuzzer(false);
-    delay(100);
-    setBuzzer(true);
-    delay(100);
-    setBuzzer(false);
-    Serial.println(F("[STARTUP] Buzzer test complete"));
-  } else {
-    Serial.println(F("[STARTUP] Buzzer test skipped - buzzer disabled"));
-  }
+  Serial.println(F("[STARTUP] Testing buzzer (2 beeps)..."));
+  Serial.printf("[STARTUP] Buzzer config: Pin=%d, Inverted=%s\n",
+    BUZZER_PIN, buzzerInverted ? "YES" : "NO");
+  playBuzzerBeeps(2);  // Standardized startup beeps
+  Serial.println(F("[STARTUP] Buzzer test complete"));
   
   Serial.println(F("✓ Hardware test complete"));
   
@@ -1416,16 +1487,8 @@ void autoCalibrateSensorsNonBlocking() {
           Serial.println(F("✓ Both relays ENABLED"));
           Serial.println(F("✓ System ACTIVE - monitoring for safety"));
           
-          // Buzzer confirmation (Active Buzzer - uses digitalWrite)
-          if (buzzerEnabled) {
-            setBuzzer(true);   // Turn on
-            delay(150);
-            setBuzzer(false);  // Turn off
-            delay(50);
-            setBuzzer(true);   // Turn on
-            delay(150);
-            setBuzzer(false);  // Turn off
-          }
+          // Buzzer confirmation - standardized 2-beep pattern
+          playBuzzerBeeps(2);
         } else {
           Serial.println(F("\n⚠️  Sensor warnings present"));
           Serial.println(F("   System in SAFE MODE"));
@@ -1685,22 +1748,26 @@ bool validateSensorReadings(int channel) {
 // ==================== SAFETY CHECKS ====================
 void performSafetyChecks() {
   float avgVoltage = getAverageVoltage();
-  
+
   if (!sensorsValid) return;
-  
+
+  bool anyAnomaly = false;  // Track if any anomaly is active
+
   for (int ch = 0; ch < NUM_CHANNELS; ch++) {
     float avgCurrent = getAverageCurrent(ch);
-    
+
     if (avgCurrent > MAX_CURRENT) {
       channels[ch].overcurrentDebounceCount++;
-      
+      anyAnomaly = true;  // Anomaly detected
+
       if (!channels[ch].overcurrentDetected) {
         channels[ch].overcurrentDetected = true;
         channels[ch].overcurrentStartTime = millis();
         Serial.printf("⚠️  %s Overcurrent: %.2fA\n", channels[ch].name, avgCurrent);
+        startContinuousBuzzer();  // Start continuous beeping
       }
-      
-      if (channels[ch].overcurrentDebounceCount >= SAFETY_DEBOUNCE_COUNT && 
+
+      if (channels[ch].overcurrentDebounceCount >= SAFETY_DEBOUNCE_COUNT &&
           (millis() - channels[ch].overcurrentStartTime > OVERCURRENT_TIME)) {
         char reason[32];
         snprintf(reason, sizeof(reason), "%s_OVERCURRENT", channels[ch].name);
@@ -1711,17 +1778,19 @@ void performSafetyChecks() {
       channels[ch].overcurrentDebounceCount = 0;
     }
   }
-  
+
   if (avgVoltage > MAX_VOLTAGE) {
     overvoltageDebounceCount++;
-    
+    anyAnomaly = true;  // Anomaly detected
+
     if (!overvoltageDetected) {
       overvoltageDetected = true;
       overvoltageStartTime = millis();
       Serial.printf("⚠️  Overvoltage: %.1fV\n", avgVoltage);
+      startContinuousBuzzer();  // Start continuous beeping
     }
-    
-    if (overvoltageDebounceCount >= SAFETY_DEBOUNCE_COUNT && 
+
+    if (overvoltageDebounceCount >= SAFETY_DEBOUNCE_COUNT &&
         (millis() - overvoltageStartTime > OVERVOLTAGE_TIME)) {
       for (int ch = 0; ch < NUM_CHANNELS; ch++) {
         triggerSafetyShutdown(ch, "OVERVOLTAGE");
@@ -1732,14 +1801,22 @@ void performSafetyChecks() {
     overvoltageDetected = false;
     overvoltageDebounceCount = 0;
   }
-  
+
   if (avgVoltage < MIN_VOLTAGE && avgVoltage > MIN_VALID_VOLTAGE) {
+    anyAnomaly = true;  // Anomaly detected
+
     if (!undervoltageDetected) {
       undervoltageDetected = true;
       Serial.printf("⚠️  Undervoltage: %.1fV\n", avgVoltage);
+      startContinuousBuzzer();  // Start continuous beeping
     }
   } else {
     undervoltageDetected = false;
+  }
+
+  // Stop continuous buzzer if no anomalies detected
+  if (!anyAnomaly && !overvoltageDetected && !undervoltageDetected) {
+    stopContinuousBuzzer();
   }
 }
 
@@ -1757,20 +1834,8 @@ void triggerSafetyShutdown(int channel, const char* reason) {
 
   // LEDs will be controlled by updateStatusLEDs()
 
-  if (buzzerEnabled) {
-    Serial.println("[BUZZER] Playing shutdown alert (3 beeps)");
-    for (int i = 0; i < 3; i++) {
-      Serial.printf("[BUZZER] Beep %d/3\n", i + 1);
-      setBuzzer(true);
-      delay(150);
-      setBuzzer(false);
-      delay(100);
-      feedWatchdog();
-    }
-    Serial.println("[BUZZER] Shutdown alert complete");
-  } else {
-    Serial.println("[BUZZER] Buzzer disabled - no alert played");
-  }
+  stopContinuousBuzzer();  // Stop continuous beeping before shutdown alert
+  playBuzzerBeeps(3);  // Play standardized 3-beep shutdown alert
   
   if (sdCardAvailable) {
     char logBuffer[64];
