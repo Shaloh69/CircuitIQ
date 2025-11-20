@@ -203,9 +203,9 @@ WiFiClientSecure secureClient;
 #define RELAY_TURNOFF_DELAY 1400  // Delay before turning OFF relay (ms) - prevents chatter, allows load settling
 
 // ==================== BUZZER CONFIGURATION ====================
-#define BUZZER_BEEP_ON_MS   250   // Buzzer ON duration (ms) - increased from 150ms
-#define BUZZER_BEEP_OFF_MS  200   // Buzzer OFF duration between beeps (ms) - increased from 100ms
-#define BUZZER_CONTINUOUS_CYCLE_MS 450  // Total cycle time for continuous beeping (ON + OFF)
+#define BUZZER_BEEP_ON_MS   500   // Buzzer ON duration (ms) - extended for relay switching time
+#define BUZZER_BEEP_OFF_MS  500   // Buzzer OFF duration between beeps (ms) - extended for clear separation
+#define BUZZER_CONTINUOUS_CYCLE_MS 1000  // Total cycle time for continuous beeping (ON + OFF)
 
 // ==================== SAFETY THRESHOLDS ====================
 #define MAX_CURRENT         4.5
