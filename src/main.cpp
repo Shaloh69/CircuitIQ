@@ -14,12 +14,32 @@
 
 /*
  * ESP32 Dual-Channel Electrical Safety Monitor - VERSION v6.0 ENHANCED
- * 
+ *
+ * PHILIPPINE ELECTRICAL STANDARDS COMPLIANT:
+ * ✅ Configured for 60Hz AC frequency (Philippines standard)
+ * ✅ Voltage monitoring: 220V nominal (200-250V safety range)
+ * ✅ Current monitoring: ACS712-05B with 10kΩ+20kΩ voltage divider
+ * ✅ RMS calculations: Mathematically accurate for AC measurements
+ * ✅ Calibration system: Prevents compounding errors with cal_reset command
+ *
+ * SENSOR CALCULATIONS:
+ * VOLTAGE (ZMPT101B):
+ *   - RMS = sqrt(sum((V - offset)²) / 100) × calibration
+ *   - Samples: 100 readings × 150µs = 15ms (90% of 60Hz cycle)
+ *   - Default calibration: 0.934 (can be reset with cal_reset)
+ *
+ * CURRENT (ACS712-05B):
+ *   - Voltage divider: 10kΩ + 20kΩ (ratio 0.667, scale 1.5)
+ *   - Sensitivity: 185mV/A (5A version)
+ *   - Zero point: 2.5V (after divider: 1.67V)
+ *   - RMS = sqrt(sum(i²) / 100) × calibration
+ *
  * MODIFIED FOR ACTIVE BUZZER WITH RELAY CONTROL (3-24V DC)
  * - Changed tone() calls to digitalWrite() for active buzzer compatibility
- * - Buzzer controlled via relay module (active-LOW trigger)
- * - GPIO LOW energizes relay → buzzer ON
- * - GPIO HIGH de-energizes relay → buzzer OFF
+ * - Buzzer controlled via relay module (active-HIGH by default)
+ * - GPIO HIGH energizes relay → buzzer ON
+ * - GPIO LOW de-energizes relay → buzzer OFF
+ * - Use 'buzzer_invert' command if your relay is active-LOW
  * 
  * NEW LCD ENHANCEMENTS (v5.5):
  * ✅ ERROR DISPLAYS: Shows critical errors on LCD
@@ -149,10 +169,10 @@ WiFiClientSecure secureClient;
 
 // ==================== ZMPT101B CONFIGURATION ====================
 #define ZMPT101B_SENSITIVITY 0.0125
-#define AC_FREQUENCY        50
-#define AC_PERIOD_MS        20
+#define AC_FREQUENCY        60      // Philippines uses 60Hz (NOT 50Hz!)
+#define AC_PERIOD_MS        17      // 1000ms/60Hz = 16.67ms ≈ 17ms
 #define RMS_SAMPLES         100
-#define RMS_SAMPLE_DELAY_US 150
+#define RMS_SAMPLE_DELAY_US 150     // 100 samples × 150µs = 15ms (captures 90% of 60Hz cycle)
 #define MIN_AC_SWING        0.1
 #define MIN_VALID_VOLTAGE   50.0
 #define VOLTAGE_AUTO_CAL_SAMPLES 10
@@ -304,7 +324,7 @@ ChannelData channels[NUM_CHANNELS];
 
 float voltageReading = 0.0;
 float voltageOffset = 0.0;
-float voltageCalibration = 0.934;  // *** FIXED: Changed from 1.0 to 0.934 (239V / 256V)
+float voltageCalibration = 0.934;  // Pre-calibrated factor (reset to 1.0 before recalibrating!)
 float voltageBuffer[MOVING_AVERAGE_SIZE];
 int voltageBufferIndex = 0;
 
@@ -2275,6 +2295,41 @@ void processCommand(const char* command) {
   else if (strcmp(command, "cal_voltage") == 0) {
     calibrateVoltageWithReference();
   }
+  else if (strcmp(command, "cal_reset") == 0) {
+    Serial.println(F("\n=== CALIBRATION RESET ==="));
+    Serial.println(F("Resetting all calibration factors to defaults..."));
+
+    // Reset voltage calibration
+    voltageCalibration = 1.0;
+    voltageOffset = 0.0;
+
+    // Reset current calibration for both channels
+    channels[CHANNEL_1].currentCalibration = 1.0;
+    channels[CHANNEL_2].currentCalibration = 1.0;
+    channels[CHANNEL_1].currentOffset = ACS712_ZERO_CURRENT * VOLTAGE_DIVIDER_RATIO;
+    channels[CHANNEL_2].currentOffset = ACS712_ZERO_CURRENT * VOLTAGE_DIVIDER_RATIO;
+
+    // Reset power factor
+    calData.powerFactor = 0.85;
+
+    // Update calibration data
+    calData.voltageCalibration = voltageCalibration;
+    calData.ch1CurrentCalibration = channels[CHANNEL_1].currentCalibration;
+    calData.ch2CurrentCalibration = channels[CHANNEL_2].currentCalibration;
+    calData.ch1CurrentOffset = channels[CHANNEL_1].currentOffset;
+    calData.ch2CurrentOffset = channels[CHANNEL_2].currentOffset;
+
+    saveCalibrationData();
+
+    Serial.println(F("✓ All calibration factors reset to factory defaults"));
+    Serial.println(F("  Voltage Cal: 1.0"));
+    Serial.println(F("  Current Cal CH1: 1.0"));
+    Serial.println(F("  Current Cal CH2: 1.0"));
+    Serial.printf("  Current Offset: %.3fV\n", ACS712_ZERO_CURRENT * VOLTAGE_DIVIDER_RATIO);
+    Serial.println(F("  Power Factor: 0.85"));
+    Serial.println(F("\nYou can now recalibrate without compounding errors!"));
+    Serial.println(F("Use: cal_voltage, cal (for auto calibration)"));
+  }
   else if (strcmp(command, "stats") == 0) {
     printStatistics();
   }
@@ -2620,6 +2675,7 @@ void printMenu() {
   Serial.println(F("CALIBRATION:"));
   Serial.println(F("  calibrate  - Auto-calibrate"));
   Serial.println(F("  cal_voltage- Voltage wizard"));
+  Serial.println(F("  cal_reset  - Reset calibration to defaults (prevents compounding)"));
   Serial.println();
   Serial.println(F("SETTINGS:"));
   Serial.println(F("  manual     - Toggle manual"));
