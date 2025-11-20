@@ -200,6 +200,7 @@ WiFiClientSecure secureClient;
 #define RELAY_ON_STATE      LOW
 #define RELAY_OFF_STATE     HIGH
 #define RELAY_VERIFY_INTERVAL 5000
+#define RELAY_TURNOFF_DELAY 1400  // Delay before turning OFF relay (ms) - prevents chatter, allows load settling
 
 // ==================== SAFETY THRESHOLDS ====================
 #define MAX_CURRENT         4.5
@@ -473,7 +474,7 @@ void updatePerformanceMetrics(unsigned long loopTime);
 bool isSafeToOperate(int channel);
 void handleBrownout();
 void enableChannel(int channel);
-void disableChannel(int channel);
+void disableChannel(int channel, bool immediate = false);
 void enableAllChannels();
 void disableAllChannels();
 float calculateCostPerHour(float watts);
@@ -1749,7 +1750,7 @@ void triggerSafetyShutdown(int channel, const char* reason) {
   Serial.printf("\n🚨 SAFETY SHUTDOWN: %s - %s\n", channels[channel].name, reason);
   Serial.printf("[SHUTDOWN] Time=%lu, Channel=%d, Reason=%s\n", millis(), channel, reason);
 
-  disableChannel(channel);
+  disableChannel(channel, true);  // immediate=true for safety shutdowns
 
   currentState = STATE_ERROR;
   channels[channel].shutdownCount++;
@@ -1816,11 +1817,23 @@ void enableChannel(int channel) {
   }
 }
 
-void disableChannel(int channel) {
+void disableChannel(int channel, bool immediate) {
   if (channel < 0 || channel >= NUM_CHANNELS) return;
-  
+
   channels[channel].relayEnabled = false;
   channels[channel].relayCommandState = false;
+
+  if (!immediate && RELAY_TURNOFF_DELAY > 0) {
+    // Normal shutdown: Wait before turning off to prevent chatter and allow load settling
+    Serial.printf("[RELAY] %s turning OFF in %.1f seconds...\n",
+                  channels[channel].name, RELAY_TURNOFF_DELAY / 1000.0);
+    delay(RELAY_TURNOFF_DELAY);
+    feedWatchdog();  // Prevent watchdog timeout during delay
+  } else if (immediate) {
+    // Emergency shutdown: Turn off immediately
+    Serial.printf("[RELAY] %s EMERGENCY SHUTDOWN - immediate\n", channels[channel].name);
+  }
+
   digitalWrite(channels[channel].relayPin, RELAY_OFF_STATE);
   Serial.printf("✓ %s DISABLED\n", channels[channel].name);
 }
