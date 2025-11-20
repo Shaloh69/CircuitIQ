@@ -2385,21 +2385,35 @@ void processCommand(const char* command) {
   }
   else if (strcmp(command, "buzzer_status") == 0) {
     Serial.println(F("\n=== BUZZER STATUS ==="));
-    Serial.printf("Pin: %d\n", BUZZER_PIN);
+    Serial.printf("GPIO Pin: %d\n", BUZZER_PIN);
     Serial.printf("Enabled: %s\n", buzzerEnabled ? "YES" : "NO");
-    Serial.printf("Inverted: %s\n", buzzerInverted ? "YES (active-LOW)" : "NO (active-HIGH)");
+    Serial.printf("Polarity: %s\n", buzzerInverted ? "INVERTED (active-LOW)" : "NORMAL (active-HIGH)");
+
     int pinState = digitalRead(BUZZER_PIN);
-    Serial.printf("Current Pin State: %s\n", pinState == HIGH ? "HIGH" : "LOW");
-    Serial.printf("Expected State (OFF): %s\n", buzzerInverted ? "HIGH" : "LOW");
+    Serial.printf("\nHardware State:\n");
+    Serial.printf("  Current GPIO: %s\n", pinState == HIGH ? "HIGH" : "LOW");
+    Serial.printf("  Expected (OFF): %s\n", buzzerInverted ? "HIGH" : "LOW");
+
     if ((buzzerInverted && pinState == HIGH) || (!buzzerInverted && pinState == LOW)) {
-      Serial.println("Status: ✓ Buzzer should be OFF");
+      Serial.println("  Status: ✓ Buzzer should be OFF");
     } else {
-      Serial.println("Status: ⚠️ WARNING - Buzzer may be ON!");
+      Serial.println("  Status: ⚠️ WARNING - Buzzer may be ON!");
     }
-    Serial.println(F("\nCommands:"));
-    Serial.println(F("  buzzer         - Toggle enable/disable"));
-    Serial.println(F("  buzzer_invert  - Toggle polarity (use if continuously beeping)"));
-    Serial.println(F("  buzzer_test    - Test buzzer with 3 beeps"));
+
+    Serial.println(F("\nRelay Module Type Guide:"));
+    Serial.println(F("  Active-HIGH: GPIO HIGH = Relay ON (most single relay modules)"));
+    Serial.println(F("  Active-LOW:  GPIO LOW = Relay ON (most multi-channel modules)"));
+
+    Serial.println(F("\nTroubleshooting:"));
+    Serial.println(F("  1. buzzer_test       - Test with 3 beeps"));
+    Serial.println(F("  2. buzzer_gpio_test  - Raw GPIO hardware test"));
+    Serial.println(F("  3. buzzer_invert     - Switch polarity if backwards"));
+    Serial.println(F("  4. gpio_scan         - Check all pin states"));
+
+    Serial.println(F("\nIf relay not working at all:"));
+    Serial.println(F("  • Check wiring: GPIO19 → Relay IN"));
+    Serial.println(F("  • Check relay power: VCC & GND connected"));
+    Serial.println(F("  • Run: buzzer_gpio_test"));
   }
   else if (strcmp(command, "buzzer_test") == 0) {
     testBuzzer();
@@ -2432,6 +2446,73 @@ void processCommand(const char* command) {
     Serial.println(F("\nCommands:"));
     Serial.println(F("  current_debug  - Toggle detailed current sensor logging"));
     Serial.println(F("  current_status - Show this status"));
+  }
+  else if (strcmp(command, "buzzer_gpio_test") == 0) {
+    Serial.println(F("\n=== BUZZER GPIO HARDWARE TEST ==="));
+    Serial.printf("Testing GPIO Pin %d\n", BUZZER_PIN);
+    Serial.println(F("This will manually toggle the pin HIGH and LOW"));
+    Serial.println(F("Watch/listen for your relay clicking or buzzer sound\n"));
+
+    // Read initial state
+    int initialState = digitalRead(BUZZER_PIN);
+    Serial.printf("Initial pin state: %s\n\n", initialState == HIGH ? "HIGH" : "LOW");
+
+    // Test 1: Force HIGH
+    Serial.println(F("Test 1: Setting pin HIGH..."));
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(100);
+    int readHigh = digitalRead(BUZZER_PIN);
+    Serial.printf("  Pin set to HIGH\n");
+    Serial.printf("  Pin reads back: %s\n", readHigh == HIGH ? "HIGH ✓" : "LOW ✗ PROBLEM!");
+    Serial.println(F("  → Relay should be ENERGIZED (click sound)"));
+    Serial.println(F("  → LED on relay module should be ON"));
+    delay(2000);
+    digitalWrite(BUZZER_PIN, LOW);
+    Serial.println();
+
+    // Test 2: Force LOW
+    Serial.println(F("Test 2: Setting pin LOW..."));
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(100);
+    int readLow = digitalRead(BUZZER_PIN);
+    Serial.printf("  Pin set to LOW\n");
+    Serial.printf("  Pin reads back: %s\n", readLow == LOW ? "LOW ✓" : "HIGH ✗ PROBLEM!");
+    Serial.println(F("  → Relay should be DE-ENERGIZED (click sound)"));
+    Serial.println(F("  → LED on relay module should be OFF"));
+    delay(2000);
+    Serial.println();
+
+    // Test 3: Rapid toggle
+    Serial.println(F("Test 3: Rapid toggle (5 times)..."));
+    for (int i = 0; i < 5; i++) {
+      Serial.printf("  Toggle %d: HIGH\n", i + 1);
+      digitalWrite(BUZZER_PIN, HIGH);
+      delay(500);
+      Serial.printf("  Toggle %d: LOW\n", i + 1);
+      digitalWrite(BUZZER_PIN, LOW);
+      delay(500);
+    }
+
+    Serial.println(F("\n=== TEST COMPLETE ==="));
+    Serial.println(F("Did you hear/see anything? (relay clicks, LED, buzzer sound)"));
+    Serial.println(F("\nIf NO:"));
+    Serial.println(F("  1. Check wiring: ESP32 GPIO19 → Relay IN pin"));
+    Serial.println(F("  2. Check relay module has power (VCC, GND)"));
+    Serial.println(F("  3. Check relay module LED indicator"));
+    Serial.println(F("  4. Try different GPIO pin (pin may be damaged)"));
+    Serial.println(F("\nIf YES but wrong polarity:"));
+    Serial.println(F("  Use command: buzzer_invert"));
+  }
+  else if (strcmp(command, "gpio_scan") == 0) {
+    Serial.println(F("\n=== GPIO PIN SCAN ==="));
+    Serial.printf("BUZZER_PIN (GPIO %d): %s\n", BUZZER_PIN, digitalRead(BUZZER_PIN) == HIGH ? "HIGH" : "LOW");
+    Serial.printf("RELAY_CH1 (GPIO %d): %s\n", RELAY_CH1_PIN, digitalRead(RELAY_CH1_PIN) == HIGH ? "HIGH" : "LOW");
+    Serial.printf("RELAY_CH2 (GPIO %d): %s\n", RELAY_CH2_PIN, digitalRead(RELAY_CH2_PIN) == HIGH ? "HIGH" : "LOW");
+    Serial.printf("RED_LED (GPIO %d): %s\n", RED_LED_PIN, digitalRead(RED_LED_PIN) == HIGH ? "HIGH" : "LOW");
+    Serial.printf("YELLOW_LED (GPIO %d): %s\n", YELLOW_LED_PIN, digitalRead(YELLOW_LED_PIN) == HIGH ? "HIGH" : "LOW");
+    Serial.printf("GREEN_LED (GPIO %d): %s\n", GREEN_LED_PIN, digitalRead(GREEN_LED_PIN) == HIGH ? "HIGH" : "LOW");
+    Serial.printf("BLUE_LED (GPIO %d): %s\n", BLUE_LED_PIN, digitalRead(BLUE_LED_PIN) == HIGH ? "HIGH" : "LOW");
+    Serial.println(F("\nNote: This shows current pin states"));
   }
   else if (strcmp(command, "display") == 0) {
     displayEnabled = !displayEnabled;
@@ -2686,14 +2767,16 @@ void printMenu() {
   Serial.println(F("  clear      - Clear stats"));
   Serial.println();
   Serial.println(F("BUZZER (Audio Alerts):"));
-  Serial.println(F("  buzzer_status - Show buzzer configuration & state"));
-  Serial.println(F("  buzzer        - Toggle buzzer on/off"));
-  Serial.println(F("  buzzer_test   - Test buzzer (3 beeps)"));
-  Serial.println(F("  buzzer_invert - Toggle polarity (fix continuous beeping)"));
+  Serial.println(F("  buzzer_status     - Show buzzer configuration & state"));
+  Serial.println(F("  buzzer            - Toggle buzzer on/off"));
+  Serial.println(F("  buzzer_test       - Test buzzer (3 beeps)"));
+  Serial.println(F("  buzzer_invert     - Toggle polarity (fix continuous beeping)"));
+  Serial.println(F("  buzzer_gpio_test  - Hardware test (troubleshoot relay not working)"));
   Serial.println();
-  Serial.println(F("CURRENT SENSOR DIAGNOSTICS:"));
-  Serial.println(F("  current_status - Show current sensor readings & config"));
-  Serial.println(F("  current_debug  - Toggle detailed current sensor logging"));
+  Serial.println(F("HARDWARE DIAGNOSTICS:"));
+  Serial.println(F("  current_status    - Show current sensor readings & config"));
+  Serial.println(F("  current_debug     - Toggle detailed current sensor logging"));
+  Serial.println(F("  gpio_scan         - Show all GPIO pin states"));
   Serial.println(F("========================================\n"));
 }
 
