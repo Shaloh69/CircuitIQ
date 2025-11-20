@@ -80,13 +80,32 @@
  * - ZMPT101B: OUT→GPIO35
  * - Relay CH1: GPIO16
  * - Relay CH2: GPIO17
- * - Buzzer Relay: GPIO19 (IN) - Active-LOW relay module controlling 3-24V buzzer
  * - I2C LCD: SDA→21, SCL→22, VCC→5V, GND→GND
  * - LED Indicators:
  *   • RED LED (GPIO2): Short circuit / Sensor faults
  *   • YELLOW LED (GPIO27): Overload (overcurrent >4.5A)
  *   • GREEN LED (GPIO4): Normal operation
  *   • BLUE LED (GPIO5): Under/Overvoltage conditions
+ *
+ * BUZZER POWER SETUP (DUAL HLK CONFIGURATION):
+ * - HLK #1 (AC→5V): Powers ESP32 + Relay Module + Sensors
+ * - Buzzer Relay Module:
+ *   • GPIO19 → Relay IN pin
+ *   • VCC → 5V from HLK #1
+ *   • GND → Ground
+ * - Relay Contacts (switches AC mains):
+ *   • COM → AC Live (from mains)
+ *   • NO → HLK #2 AC Input (Live)
+ *   • AC Neutral → HLK #2 AC Input (Neutral) - direct connection
+ * - HLK #2 (AC→5V/12V): Powers buzzer when relay closes
+ *   • DC OUT+ → Buzzer +
+ *   • DC OUT- → Buzzer -
+ *
+ * SAFETY NOTES:
+ * ⚠️  Relay switches AC MAINS voltage - ensure proper isolation!
+ * ⚠️  HLK modules must be rated for your mains voltage (220V Philippines)
+ * ✅ This design provides excellent isolation between control and buzzer
+ * ✅ Relay failure = buzzer stays OFF (fail-safe)
  */
 
 #include <EEPROM.h>
@@ -2400,20 +2419,27 @@ void processCommand(const char* command) {
       Serial.println("  Status: ⚠️ WARNING - Buzzer may be ON!");
     }
 
+    Serial.println(F("\nDual HLK Power Setup:"));
+    Serial.println(F("  HLK #1 → ESP32, Relay Module, Sensors"));
+    Serial.println(F("  Relay → Switches AC mains to HLK #2"));
+    Serial.println(F("  HLK #2 → Powers buzzer (only when relay ON)"));
+
     Serial.println(F("\nRelay Module Type Guide:"));
     Serial.println(F("  Active-HIGH: GPIO HIGH = Relay ON (most single relay modules)"));
     Serial.println(F("  Active-LOW:  GPIO LOW = Relay ON (most multi-channel modules)"));
 
-    Serial.println(F("\nTroubleshooting:"));
-    Serial.println(F("  1. buzzer_test       - Test with 3 beeps"));
-    Serial.println(F("  2. buzzer_gpio_test  - Raw GPIO hardware test"));
+    Serial.println(F("\nDiagnostic Commands:"));
+    Serial.println(F("  1. buzzer_test       - Test with 3 beeps (normal operation)"));
+    Serial.println(F("  2. buzzer_gpio_test  - Raw GPIO test (checks relay clicking)"));
     Serial.println(F("  3. buzzer_invert     - Switch polarity if backwards"));
-    Serial.println(F("  4. gpio_scan         - Check all pin states"));
+    Serial.println(F("  4. gpio_scan         - Show all pin states"));
 
-    Serial.println(F("\nIf relay not working at all:"));
-    Serial.println(F("  • Check wiring: GPIO19 → Relay IN"));
-    Serial.println(F("  • Check relay power: VCC & GND connected"));
-    Serial.println(F("  • Run: buzzer_gpio_test"));
+    Serial.println(F("\nTroubleshooting Chain:"));
+    Serial.println(F("  1. GPIO19 must toggle → Check with gpio_scan"));
+    Serial.println(F("  2. Relay must click → Run buzzer_gpio_test, listen"));
+    Serial.println(F("  3. AC must reach HLK #2 → Measure with multimeter"));
+    Serial.println(F("  4. HLK #2 must output DC → Measure 5V or 12V"));
+    Serial.println(F("  5. Buzzer must receive power → Test directly"));
   }
   else if (strcmp(command, "buzzer_test") == 0) {
     testBuzzer();
@@ -2494,14 +2520,36 @@ void processCommand(const char* command) {
     }
 
     Serial.println(F("\n=== TEST COMPLETE ==="));
-    Serial.println(F("Did you hear/see anything? (relay clicks, LED, buzzer sound)"));
-    Serial.println(F("\nIf NO:"));
-    Serial.println(F("  1. Check wiring: ESP32 GPIO19 → Relay IN pin"));
-    Serial.println(F("  2. Check relay module has power (VCC, GND)"));
-    Serial.println(F("  3. Check relay module LED indicator"));
-    Serial.println(F("  4. Try different GPIO pin (pin may be damaged)"));
-    Serial.println(F("\nIf YES but wrong polarity:"));
-    Serial.println(F("  Use command: buzzer_invert"));
+    Serial.println(F("Did you hear/see anything?"));
+    Serial.println(F("  • Relay clicks (mechanical sound)"));
+    Serial.println(F("  • Relay module LED turning on/off"));
+    Serial.println(F("  • Buzzer sound (if HLK #2 is powered)"));
+
+    Serial.println(F("\n--- DUAL HLK SETUP TROUBLESHOOTING ---"));
+    Serial.println(F("\nIf RELAY NOT CLICKING:"));
+    Serial.println(F("  1. Check: ESP32 GPIO19 → Relay IN pin"));
+    Serial.println(F("  2. Check: Relay VCC connected to HLK #1 output (5V)"));
+    Serial.println(F("  3. Check: Relay GND connected to common ground"));
+    Serial.println(F("  4. Check: Relay module LED indicator responding"));
+    Serial.println(F("  5. Try: Different GPIO pin (19 may be damaged)"));
+
+    Serial.println(F("\nIf RELAY CLICKS but NO BUZZER:"));
+    Serial.println(F("  1. Check: Relay COM → AC Live (220V mains)"));
+    Serial.println(F("  2. Check: Relay NO → HLK #2 AC Input (Live)"));
+    Serial.println(F("  3. Check: AC Neutral → HLK #2 AC Input (Neutral)"));
+    Serial.println(F("  4. Measure: AC voltage at HLK #2 input when relay ON"));
+    Serial.println(F("  5. Check: HLK #2 DC output with multimeter (5V or 12V)"));
+    Serial.println(F("  6. Check: Buzzer connected to HLK #2 DC output"));
+    Serial.println(F("  7. Test: Buzzer directly with HLK #2 DC output"));
+
+    Serial.println(F("\nIf RELAY WORKS but WRONG POLARITY:"));
+    Serial.println(F("  • Active-HIGH: Relay ON when GPIO HIGH (buzzer sounds)"));
+    Serial.println(F("  • Active-LOW: Relay ON when GPIO LOW (buzzer sounds)"));
+    Serial.println(F("  • Run: buzzer_invert"));
+
+    Serial.println(F("\n⚠️  SAFETY WARNING:"));
+    Serial.println(F("  Relay switches AC MAINS (220V) - be careful!"));
+    Serial.println(F("  Ensure proper insulation on all AC connections"));
   }
   else if (strcmp(command, "gpio_scan") == 0) {
     Serial.println(F("\n=== GPIO PIN SCAN ==="));
